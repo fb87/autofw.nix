@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <mutex>
 #include <span>
+#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -272,5 +273,77 @@ inline auto release_image(EGLDisplay dpy, dmabuf_image& img) -> void
     img.gl_texture = 0;
 }
 #endif // SHELL_RENDERER_GL
+
+// ---- Production graphics: swapchain + fences (M20) -------------------------
+// A small buffer pool for scanout-eligible surfaces (robust DMA-BUF / GBM reuse,
+// multi-buffer presentation). Each slot tracks whether it is scanned-out and an
+// optional explicit fence (EGL_KHR_fence_sync / DRM fence fd).
+struct slot
+{
+    std::uint32_t handle{};
+    std::uint32_t fb_id{};
+    bool in_use{};
+    std::int32_t fence_fd{-1}; // -1 == no fence
+};
+
+struct swapchain
+{
+    std::vector<slot> slots;
+    std::uint32_t count{};
+    std::uint32_t next{};
+
+    explicit swapchain(std::uint32_t n = 3)
+    {
+        slots.resize(n);
+        count = n;
+    }
+
+    auto acquire() -> slot*;
+    auto release(std::uint32_t i) -> void;
+};
+
+inline auto swapchain::acquire() -> slot*
+{
+    for (std::uint32_t i = 0; i < count; ++i)
+    {
+        std::uint32_t idx = (next + i) % count;
+        if (!slots[idx].in_use)
+        {
+            slots[idx].in_use = true;
+            next = idx + 1;
+            return &slots[idx];
+        }
+    }
+    return nullptr; // all slots busy; caller should wait/block
+}
+
+inline auto swapchain::release(std::uint32_t i) -> void
+{
+    if (i < count)
+        slots[i].in_use = false;
+}
+
+// Explicit fence helper: wrap a DRM/EGL fence fd so a buffer is not reused
+// until the GPU is done writing it.
+struct fence
+{
+    std::int32_t fd{-1};
+
+    inline explicit operator bool() const
+    {
+        return fd >= 0;
+    }
+    inline void close()
+    {
+        if (fd >= 0)
+            ::close(fd);
+        fd = -1;
+    }
+};
+
+inline auto import_fence(std::int32_t fd) -> fence
+{
+    return fence{fd};
+}
 
 } // namespace shell::texture
