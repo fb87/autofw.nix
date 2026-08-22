@@ -69,7 +69,15 @@ FlutterTaskRunnerDescription TaskRunner::description() {
 void TaskRunner::PostTask(FlutterTask task, uint64_t target_time_nanos) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    queue_.push_back({task, target_time_nanos});
+    queue_.push_back(Item{nullptr, task, target_time_nanos, false});
+  }
+  cv_.notify_one();
+}
+
+void TaskRunner::PostClosure(std::function<void()> fn) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    queue_.push_back(Item{std::move(fn), FlutterTask{}, 0, true});
   }
   cv_.notify_one();
 }
@@ -84,13 +92,21 @@ void TaskRunner::Loop() {
         cv_.wait(lock);
         continue;
       }
+      // Run closures first (in insertion order), then Flutter tasks by target
+      // time.
       auto it = std::min_element(
           queue_.begin(), queue_.end(),
           [](const Item& a, const Item& b) {
+            if (a.is_closure != b.is_closure) return a.is_closure;
             return a.target_time_nanos < b.target_time_nanos;
           });
       item = *it;
       queue_.erase(it);
+    }
+
+    if (item.is_closure) {
+      if (item.fn) item.fn();
+      continue;
     }
 
     uint64_t now = FlutterEngineGetCurrentTime();

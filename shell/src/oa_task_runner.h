@@ -16,6 +16,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 
@@ -32,6 +33,10 @@ class TaskRunner {
   void set_engine(FlutterEngine engine);
 
   void PostTask(FlutterTask task, uint64_t target_time_nanos);
+  // Run an arbitrary closure on the task runner's thread (the platform thread
+  // Flutter associates with this runner). Used to marshal native API calls
+  // (e.g. key events) that Flutter requires on the platform thread.
+  void PostClosure(std::function<void()> fn);
   bool IsCurrentThread() const {
     return std::this_thread::get_id() == thread_id_;
   }
@@ -43,8 +48,10 @@ class TaskRunner {
   std::mutex mutex_;
   std::condition_variable cv_;
   struct Item {
+    std::function<void()> fn;      // generic closure (if set)
     FlutterTask task;
     uint64_t target_time_nanos;
+    bool is_closure = false;
   };
   std::deque<Item> queue_;
   bool running_ = true;

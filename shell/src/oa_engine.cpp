@@ -449,22 +449,57 @@ void Engine::SetKeyboardKeymap(int fd, uint32_t size) {
 void Engine::SendInputEvent(const InputEvent& event) {
   if (event.device == InputDeviceKind::Keyboard) {
     OaKeyResult r = keyboard_.Translate(event.keycode, event.key_down);
-    // Continuous key repeat is delivered as separate repeat events.
-    FlutterKeyEvent key = {};
-    key.struct_size = sizeof(key);
-    key.timestamp = FlutterEngineGetCurrentTime();
-    key.type = event.key_repeat
-                   ? kFlutterKeyEventTypeRepeat
-                   : (event.key_down ? kFlutterKeyEventTypeDown
-                                     : kFlutterKeyEventTypeUp);
-    key.physical = r.physical_hid;
-    key.logical = r.logical;
-    if (event.key_down && !r.character.empty()) {
-      key.character = r.character.c_str();
+    struct CapturedKey {
+      FlutterEngine engine;
+      FlutterKeyEventType type;
+      uint64_t timestamp;
+      uint64_t physical, logical;
+      std::string character;
+      bool has_char;
+    };
+    // Copy fields so the closure survives the caller's lifetime.
+    auto captured = std::make_shared<CapturedKey>();
+    captured->engine = engine_;
+    captured->timestamp = FlutterEngineGetCurrentTime();
+    captured->type = event.key_repeat
+                         ? kFlutterKeyEventTypeRepeat
+                         : (event.key_down ? kFlutterKeyEventTypeDown
+                                           : kFlutterKeyEventTypeUp);
+    captured->physical = r.physical_hid;
+    captured->logical = r.logical;
+    captured->character = r.character;
+    captured->has_char = event.key_down && !r.character.empty();
+
+    // FlutterEngineSendKeyEvent internally posts a platform message, which
+    // must be sent on the platform thread. With a custom platform task runner,
+    // that is the runner's thread, so marshal the call there.
+    if (platform_task_runner_) {
+      platform_task_runner_->PostClosure([captured]() {
+        FlutterKeyEvent key = {};
+        key.struct_size = sizeof(key);
+        key.timestamp = captured->timestamp;
+        key.type = captured->type;
+        key.physical = captured->physical;
+        key.logical = captured->logical;
+        key.character = captured->has_char ? captured->character.c_str()
+                                           : nullptr;
+        key.synthesized = false;
+        key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
+        FlutterEngineSendKeyEvent(captured->engine, &key, nullptr, nullptr);
+      });
+    } else {
+      FlutterKeyEvent key = {};
+      key.struct_size = sizeof(key);
+      key.timestamp = captured->timestamp;
+      key.type = captured->type;
+      key.physical = captured->physical;
+      key.logical = captured->logical;
+      key.character = captured->has_char ? captured->character.c_str()
+                                         : nullptr;
+      key.synthesized = false;
+      key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
+      FlutterEngineSendKeyEvent(captured->engine, &key, nullptr, nullptr);
     }
-    key.synthesized = false;
-    key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
-    FlutterEngineSendKeyEvent(engine_, &key, nullptr, nullptr);
     return;
   }
 
