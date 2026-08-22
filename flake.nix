@@ -58,38 +58,29 @@
           '';
         };
 
-        # The shell executable, parameterized by the display backend. The
-        # backend is chosen at build time (default: wayland).
-        shellFor = backend:
-          pkgs.stdenv.mkDerivation {
-            pname = "openauto-shell";
-            version = "0.1.0";
-            src = ./shell;
-            nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.ninja ];
-            buildInputs = [
-              pkgs.libGL.dev  # EGL + OpenGLES2 headers
-              pkgs.wayland    # wayland-client / wayland-egl
-              pkgs.libgbm     # GBM (KMS)
-              pkgs.libdrm     # DRM (KMS)
-              pkgs.libffi
-              pkgs.libxkbcommon
-              flutter-engine
-            ];
-            cmakeFlags = [
-              "-DCMAKE_BUILD_TYPE=Release"
-              "-DCMAKE_INSTALL_PREFIX=${placeholder "out"}"
-              "-DFLUTTER_ENGINE_ROOT=${flutter-engine}"
-              "-DOA_BACKEND=${backend}"
-            ];
-          };
-
-        shell = shellFor "wayland";
-        shell-kms = shellFor "kms";
+        # The flshell-baseline-aligned shell app (Wayland backend).
+        shell = pkgs.stdenv.mkDerivation {
+          pname = "flshell-app";
+          version = "0.1.0";
+          src = ./shell;
+          nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.ninja ];
+          buildInputs = [
+            pkgs.libGL.dev
+            pkgs.wayland
+            pkgs.libffi
+            pkgs.libxkbcommon
+            flutter-engine
+          ];
+          cmakeFlags = [
+            "-DCMAKE_BUILD_TYPE=Release"
+            "-DCMAKE_INSTALL_PREFIX=${placeholder "out"}"
+            "-DFLUTTER_ENGINE_ROOT=${flutter-engine}"
+          ];
+        };
       in {
         flutter-engine = flutter-engine;
         default = flutter-engine;
         shell = shell;
-        shell-kms = shell-kms;
       };
     }) supportedSystems);
 
