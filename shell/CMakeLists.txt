@@ -11,15 +11,17 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 # ---------------------------------------------------------------------------
-# Flutter embedder library + headers. Provide the install/layout path via
-# FLUTTER_ENGINE_ROOT (the flutter-engine output from our flake), or discover
-# through pkg-config / an inherited environment.
+# Build configuration: select the display backend.
+#   -DOA_BACKEND=wayland   (default) Wayland compositor
+#   -DOA_BACKEND=kms       DRM/KMS + GBM
 # ---------------------------------------------------------------------------
+set(OA_BACKEND "wayland" CACHE STRING "Display backend: wayland | kms")
+
+# Flutter embedder library + headers (FLUTTER_ENGINE_ROOT or conventional dir).
 if(NOT DEFINED FLUTTER_ENGINE_ROOT)
   if(DEFINED ENV{FLUTTER_ENGINE_ROOT})
     set(FLUTTER_ENGINE_ROOT "$ENV{FLUTTER_ENGINE_ROOT}")
   else()
-    # Fall back to a conventional relative location produced by the flake.
     set(FLUTTER_ENGINE_ROOT "${CMAKE_SOURCE_DIR}/../result")
   endif()
 endif()
@@ -29,80 +31,55 @@ find_path(FLUTTER_EMBEDDER_INCLUDE_DIR flutter_embedder.h
 find_library(FLUTTER_ENGINE_LIBRARY flutter_engine
   PATHS "${FLUTTER_ENGINE_ROOT}/lib")
 
-# ---------------------------------------------------------------------------
-# System dependencies
-# ---------------------------------------------------------------------------
+# System deps.
 find_package(PkgConfig REQUIRED)
-
 pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-egl)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
-
-# EGL / OpenGLES2 (libglvnd).
 find_path(EGL_INCLUDE_DIR NAMES EGL/egl.h)
 find_library(EGL_LIBRARY NAMES EGL libEGL)
 find_path(GLES2_INCLUDE_DIR NAMES GLES2/gl2.h)
 find_library(GLES2_LIBRARY NAMES GLESv2 libGLESv2)
-
-# Expose the extended EGL prototypes (eglGetPlatformDisplayEXT, ...).
 add_compile_definitions(EGL_EGLEXT_PROTOTYPES)
 
-# DRM/KMS backend dependencies (found directly; pkg-config for these tends to
-# be unreliable depending on output layout).
+# DRM deps (only needed for the KMS backend).
 find_path(GBM_INCLUDE_DIR NAMES gbm.h)
 find_library(GBM_LIBRARY NAMES gbm)
 find_path(DRM_MODESET_INCLUDE_DIR NAMES xf86drmMode.h)
-# drm.h lives in a libdrm-specific subdirectory.
 find_path(DRM_CORE_INCLUDE_DIR NAMES drm.h PATHS "${DRM_MODESET_INCLUDE_DIR}/.."
           PATH_SUFFIXES libdrm)
 find_library(DRM_LIBRARY NAMES drm libdrm)
 
 # ---------------------------------------------------------------------------
-# Sources
+# Core: header-only interface library (backend-agnostic common logic).
 # ---------------------------------------------------------------------------
-set(SOURCES
-  src/main.cpp
-  src/oa_engine.cpp
-  src/oa_egl.cpp
-  src/oa_wayland.cpp
-  src/oa_kms.cpp
-  src/oa_task_runner.cpp
-  src/oa_codec.cpp
-  src/oa_texture.cpp
-  src/oa_keyboard.cpp
-  src/protocol/xdg-shell-protocol.c
-)
+add_library(openauto_core INTERFACE)
+target_include_directories(openauto_core INTERFACE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
+  ${FLUTTER_EMBEDDER_INCLUDE_DIR} ${EGL_INCLUDE_DIR} ${GLES2_INCLUDE_DIR})
+target_link_libraries(openauto_core INTERFACE
+  ${FLUTTER_ENGINE_LIBRARY} ${EGL_LIBRARY} ${GLES2_LIBRARY}
+  PkgConfig::WAYLAND PkgConfig::XKBCOMMON)
+
+# ---------------------------------------------------------------------------
+# The executable (source list depends on the selected backend).
+# ---------------------------------------------------------------------------
+set(SOURCES src/main.cpp src/protocol/xdg-shell-protocol.c)
+
+if(OA_BACKEND STREQUAL "wayland")
+  target_compile_definitions(openauto_core INTERFACE OA_BACKEND_WAYLAND=1)
+elseif(OA_BACKEND STREQUAL "kms")
+  target_compile_definitions(openauto_core INTERFACE OA_BACKEND_KMS=1)
+  if(NOT GBM_LIBRARY OR NOT DRM_LIBRARY)
+    message(FATAL_ERROR "KMS backend requested but gbm/libdrm not found")
+  endif()
+  target_include_directories(openauto_core INTERFACE
+    ${GBM_INCLUDE_DIR} ${DRM_MODESET_INCLUDE_DIR} ${DRM_CORE_INCLUDE_DIR})
+  target_link_libraries(openauto_core INTERFACE ${GBM_LIBRARY} ${DRM_LIBRARY})
+else()
+  message(FATAL_ERROR "Unknown OA_BACKEND '${OA_BACKEND}'")
+endif()
 
 add_executable(openauto_shell ${SOURCES})
-
-target_include_directories(openauto_shell PRIVATE
-  "${FLUTTER_EMBEDDER_INCLUDE_DIR}"
-  "${EGL_INCLUDE_DIR}"
-  "${GLES2_INCLUDE_DIR}"
-)
-
-target_link_libraries(openauto_shell PRIVATE
-  "${FLUTTER_ENGINE_LIBRARY}"
-  "${EGL_LIBRARY}"
-  "${GLES2_LIBRARY}"
-  PkgConfig::WAYLAND
-  PkgConfig::XKBCOMMON
-)
-
-# Attach the DRM/KMS include/lib directories when present.
-if(GBM_INCLUDE_DIR AND GBM_LIBRARY AND DRM_MODESET_INCLUDE_DIR AND
-   DRM_CORE_INCLUDE_DIR AND DRM_LIBRARY)
-  target_include_directories(openauto_shell PRIVATE
-    "${GBM_INCLUDE_DIR}"
-    "${DRM_MODESET_INCLUDE_DIR}"
-    "${DRM_CORE_INCLUDE_DIR}")
-  target_link_libraries(openauto_shell PRIVATE "${GBM_LIBRARY}" "${DRM_LIBRARY}")
-  target_compile_definitions(openauto_shell PRIVATE OA_HAVE_KMS=1)
-else()
-  message(WARNING "DRM/KMS dependencies not found; building without them")
-endif()
-
-if(NOT TARGET_ARCH)
-  target_link_libraries(openauto_shell PRIVATE ${CMAKE_DL_LIBS} pthread)
-endif()
+target_link_libraries(openauto_shell PRIVATE openauto_core ${CMAKE_DL_LIBS} pthread)
 
 install(TARGETS openauto_shell RUNTIME DESTINATION bin)

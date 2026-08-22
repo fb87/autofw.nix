@@ -1,11 +1,7 @@
-// main.cpp -- OpenAuto Flutter embedder shell.
+// main.cpp -- OpenAuto Flutter embedder shell (Wayland / DRM/KMS).
 //
-// A minimal embedder-from-scratch Flutter host that renders to a Wayland
-// compositor or to a DRM/KMS display. The active platform is chosen on the
-// command line or by probing the environment.
-//
-// Usage:
-//   openauto --backend=wayland|kms --assets=/path/to/assets [--icu=icudtl.dat]
+// Header-only core: the backend and engine are selected at build time via
+// OA_BACKEND and consumed through the functional `backend`/`engine` interfaces.
 //
 // Copyright 2026 OpenAuto Framework.
 #include <getopt.h>
@@ -18,22 +14,28 @@
 #include <thread>
 #include <vector>
 
-#include "oa_backend.h"
-#include "oa_engine.h"
+#include "core/oa_backend.h"
+#include "core/oa_engine.h"
+
+#ifdef OA_BACKEND_WAYLAND
+#include "backends/wayland/oa_wayland.h"
+#endif
+#ifdef OA_BACKEND_KMS
+#include "backends/kms/oa_kms.h"
+#endif
 
 namespace {
 
-struct Options {
+struct options {
   std::string backend = "auto";
   std::string assets;
   std::string icu;
   bool test_texture = false;  // run a demo external-texture producer
 };
 
-void PrintUsage(const char* prog) {
+void print_usage(const char* prog) {
   std::fprintf(stderr,
                "usage: %s [options]\n"
-               "  --backend B        rendering backend: wayland | kms (default auto)\n"
                "  --assets P         Flutter asset directory (required)\n"
                "  --icu P            icudtl.dat path (default <assets>/icudtl.dat)\n"
                "  --test-texture     run a demo external-texture producer\n"
@@ -41,8 +43,8 @@ void PrintUsage(const char* prog) {
                prog);
 }
 
-Options ParseArgs(int argc, char** argv) {
-  static const struct option kLongOpts[] = {
+options parse_args(int argc, char** argv) {
+  static const option kLong[] = {
       {"backend", required_argument, nullptr, 'b'},
       {"assets", required_argument, nullptr, 'a'},
       {"icu", required_argument, nullptr, 'i'},
@@ -50,9 +52,9 @@ Options ParseArgs(int argc, char** argv) {
       {"help", no_argument, nullptr, 'h'},
       {nullptr, 0, nullptr, 0},
   };
-  Options out;
+  options out;
   int c;
-  while ((c = getopt_long(argc, argv, "b:a:i:th", kLongOpts, nullptr)) != -1) {
+  while ((c = getopt_long(argc, argv, "b:a:i:th", kLong, nullptr)) != -1) {
     switch (c) {
       case 'b': out.backend = optarg; break;
       case 'a': out.assets = optarg; break;
@@ -60,133 +62,96 @@ Options ParseArgs(int argc, char** argv) {
       case 't': out.test_texture = true; break;
       case 'h':
       default:
-        PrintUsage(argv[0]);
+        print_usage(argv[0]);
         std::exit(0);
     }
   }
   return out;
 }
 
-// Demo external-texture producer. Registers texture id |kDemoTextureId| and
-// pushes a continuously animated RGBA frame to it from a dedicated thread at
-// ~30 fps, standing in for a real video sink (Android Auto / GStreamer).
-constexpr const int kDemoTextureId = 1001;
+constexpr int kDemoTextureId = 1001;
 
-void RunDemoTextureProducer(oa::Engine* engine, bool* running) {
+void run_demo_texture_producer(oa::engine::engine* e, bool* running) {
   constexpr int kW = 640, kH = 360;
   std::vector<uint8_t> rgba(static_cast<size_t>(kW) * kH * 4);
   uint64_t frame = 0;
   while (*running) {
-    // Paint a simple animated pattern: gradient background + moving bar.
     const double t = double(frame % 120) / 120.0;
-    for (int y = 0; y < kH; ++y) {
+    for (int y = 0; y < kH; ++y)
       for (int x = 0; x < kW; ++x) {
         auto* p = &rgba[(static_cast<size_t>(y) * kW + x) * 4];
-        const uint8_t r = static_cast<uint8_t>((x * 255) / kW);
-        const uint8_t g = static_cast<uint8_t>((y * 255) / kH);
-        const uint8_t b = static_cast<uint8_t>(255 - (x * 255) / kW);
-        p[0] = r;
-        p[1] = g;
-        p[2] = b;
+        p[0] = static_cast<uint8_t>((x * 255) / kW);
+        p[1] = static_cast<uint8_t>((y * 255) / kH);
+        p[2] = static_cast<uint8_t>(255 - (x * 255) / kW);
         p[3] = 255;
-        // Moving vertical bar.
-        const int bx = static_cast<int>(t * kW);
-        if (x > bx && x < bx + 40) {
-          p[0] = 255;
-          p[1] = 255;
-          p[2] = 255;
-        }
+        int bx = static_cast<int>(t * kW);
+        if (x > bx && x < bx + 40) { p[0] = p[1] = p[2] = 255; }
       }
-    }
-    engine->PushExternalTextureFrame(kDemoTextureId, kW, kH, rgba.data());
+    oa::engine::push_external_texture_frame(e, kDemoTextureId, kW, kH,
+                                            rgba.data());
     ++frame;
-    std::this_thread::sleep_for(std::chrono::milliseconds(33));  // ~30 fps
+    std::this_thread::sleep_for(std::chrono::milliseconds(33));
   }
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-  Options opts = ParseArgs(argc, argv);
-  if (opts.assets.empty()) {
-    PrintUsage(argv[0]);
-    return 1;
-  }
+  options opts = parse_args(argc, argv);
+  if (opts.assets.empty()) { print_usage(argv[0]); return 1; }
   if (opts.icu.empty()) opts.icu = opts.assets + "/icudtl.dat";
 
-  // --- Resolve the render backend. -------------------------------------------
-  oa::Backend* backend = nullptr;
+  // --- Resolve and create the backend (fixed at build time via OA_BACKEND). ---
+  oa::backend::backend* b = nullptr;
   std::string backend_name = opts.backend;
-  if (backend_name == "auto") {
-    backend_name = ::getenv("WAYLAND_DISPLAY") ? "wayland" : "kms";
-  }
-  if (backend_name == "wayland") {
-    backend = oa::CreateWaylandBackend();
-  } else if (backend_name == "kms") {
-#ifdef OA_HAVE_KMS
-    backend = oa::CreateKmsBackend();
-#else
-    std::fprintf(stderr, "[oa] built without KMS backend support\n");
-    return 1;
+#ifdef OA_BACKEND_WAYLAND
+  if (backend_name == "auto") backend_name = "wayland";
+  if (backend_name == "wayland") b = oa::backend::wayland::create_wayland();
+  else std::fprintf(stderr, "[oa] built with Wayland; ignoring --backend='%s'\n", backend_name.c_str());
 #endif
-  } else {
-    std::fprintf(stderr, "[oa] unknown backend '%s'\n", backend_name.c_str());
-    return 1;
-  }
+#ifdef OA_BACKEND_KMS
+  if (backend_name == "auto") backend_name = "kms";
+  if (backend_name == "kms") b = oa::backend::kms::create_kms();
+#endif
+  if (!b) { std::fprintf(stderr, "[oa] no backend available\n"); return 1; }
 
   std::fprintf(stderr, "[oa] backend=%s\n", backend_name.c_str());
-  if (!backend->Initialize()) {
-    std::fprintf(stderr, "[oa] backend initialization failed\n");
-    delete backend;
+  if (!oa::backend::backend_initialize(b)) {
+    oa::backend::backend_destroy(b);
     return 1;
   }
 
-  // --- Start the Flutter engine on this (platform) thread. ---------------------
-  std::unique_ptr<oa::Engine> engine =
-      oa::Engine::Create(backend, opts.assets, opts.icu);
-  if (!engine) {
-    std::fprintf(stderr, "[oa] failed to start Flutter engine\n");
-    delete backend;
+  // --- Create the Flutter engine on the platform thread. ----------------------
+  oa::engine::engine* e = oa::engine::create(b, opts.assets, opts.icu);
+  if (!e) {
+    oa::backend::backend_destroy(b);
     return 1;
   }
 
-  // Optional demo external-texture producer: registers texture id and pushes
-  // animated frames while the app runs (e.g. a gallery Texture widget).
+  // Optional demo external-texture producer.
   std::thread producer;
   bool producer_running = false;
-  if (opts.test_texture) {
-    if (engine->RegisterExternalTexture(kDemoTextureId)) {
-      producer_running = true;
-      producer = std::thread(RunDemoTextureProducer, engine.get(),
-                             &producer_running);
-      std::fprintf(stderr,
-                   "[oa] demo external texture #%d producer started\n",
-                   kDemoTextureId);
-    }
+  if (opts.test_texture && oa::engine::register_external_texture(e, kDemoTextureId)) {
+    producer_running = true;
+    producer = std::thread(run_demo_texture_producer, e, &producer_running);
   }
 
-  // The backend event loop blocks here on the platform thread. Vsync and input
-  // callbacks are delivered synchronously, so FlutterEngineOnVsync and the
-  // FlutterEngineSend* input calls all run on the thread that called
-  // FlutterEngineRun, as the embedder requires. Flutter does its own
-  // rendering on internal render threads.
-  backend->RunLoop(
-      [&engine](const oa::FrameTick& tick) { engine->OnVsync(tick); },
-      [&engine](const oa::InputEvent& ev) { engine->SendInputEvent(ev); },
-      [&engine](uint32_t w, uint32_t h, double dpi) {
-        engine->OnResize(w, h, dpi);
-      },
-      [&engine](int fd, uint32_t size) {
-        engine->SetKeyboardKeymap(fd, size);
-      });
+  // The backend loop blocks here on the platform thread; vsync/input/resize/
+  // keymap callbacks feed the engine synchronously.
+  oa::backend::backend_run_loop(
+      b,
+      [e](const oa::frame_tick& t) { oa::engine::on_vsync(e, t); },
+      [e](const oa::input_event& ev) { oa::engine::send_input(e, ev); },
+      [e](uint32_t w, uint32_t h, double d) { oa::engine::on_resize(e, w, h, d); },
+      [e](int fd, uint32_t size) { oa::engine::set_keymap(e, fd, size); });
 
-  // Shutdown in reverse order of construction.
+  // Shutdown in reverse order.
   if (producer.joinable()) {
     producer_running = false;
     producer.join();
-    engine->UnregisterExternalTexture(kDemoTextureId);
+    oa::engine::unregister_external_texture(e, kDemoTextureId);
   }
-  engine.reset();
-  delete backend;
+  oa::engine::destroy(e);
+  oa::backend::backend_destroy(b);
   return 0;
 }

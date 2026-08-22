@@ -21,24 +21,29 @@ or a **DRM/KMS** framebuffer, without copying any of the reference embedders
 
 ## Layout
 
-- `shell/` — the embedder shell, written in C++17.
-  - `src/main.cpp`           — entry point, backend selection, wiring.
-  - `src/oa_backend.h`       — abstract display backend interface.
-  - `src/oa_engine.h/.cpp`   — thin wrapper over the Flutter C embedder API.
-  - `src/oa_egl.h/.cpp`      — shared EGL helper (config/context).
-  - `src/oa_wayland.h/.cpp`  — Wayland backend (xdg-shell, wl_egl_window).
-  - `src/oa_kms.h/.cpp`      — DRM/KMS backend (GBM + page-flip).
-  - `src/oa_task_runner.h/.cpp` — platform task runner (vsync + messages).
-  - `src/oa_codec.h/.cpp`    — minimal StandardMessageCodec for platform channels.
-  - `src/protocol/`          — generated Wayland `xdg-shell` client bindings.
-- `flake.nix` — Nix flake: builds the `flutter-engine` and `openauto-shell`
-  packages, plus a development shell.
+The code is **header-only** and organised as namespace-based functional modules
+(no classes). Common (backend-agnostic) logic is split from concrete display
+backends, selected at build time via `OA_BACKEND`.
+
+- `shell/src/core/` — shared logic, independent of the display backend:
+  - `oa_types.h`       — plain data structs (`frame_tick`, `input_event`, ...).
+  - `oa_backend.h`     — `backend` dispatch table (vtable of function pointers)
+    separating the engine from a specific backend.
+  - `oa_engine.h`      — `oa::engine` handle + free functions (Flutter engine).
+  - `oa_egl.h`, `oa_codec.h`, `oa_keyboard.h`, `oa_texture.h`,
+    `oa_task_runner.h` — helper namespaces.
+- `shell/src/backends/` — concrete display backends (`backend_api` impls):
+  - `wayland/oa_wayland.h` — `oa::backend::wayland::create_wayland()`.
+  - `kms/oa_kms.h`         — `oa::backend::kms::create_kms()`.
+- `shell/src/main.cpp`  — entry point; builds the selected backend + engine.
+- `shell/src/protocol/` — generated Wayland `xdg-shell` client bindings.
+- `flake.nix` — builds `flutter-engine`, `shell` (Wayland) and `shell-kms`.
 
 ## Backends
 
 | Backend | Display path | Frame pacing | Input |
 |---------|--------------|--------------|-------|
-| `wayland` | `xdg_surface` + `wl_egl_window` | 60 Hz timer → `OnVsync` | pointer / keyboard |
+| `wayland` | `xdg_surface` + `wl_egl_window` | 60 Hz timer → vsync | pointer / keyboard |
 | `kms`     | GBM buffer + DRM page-flip | vblank wait | evdev (todo) |
 
 Both output through EGL/OpenGLES2, giving Flutter a standard `kOpenGL` renderer.
@@ -46,19 +51,16 @@ Both output through EGL/OpenGLES2, giving Flutter a standard `kOpenGL` renderer.
 ## Build & run
 
 ```sh
-# Build the shell (a Flutter assets dir is required at run time)
+# Wayland backend (default)
 nix build .#shell
+# DRM/KMS backend (build-time selection)
+nix build .#shell-kms
 
-# Run against a Wayland compositor
+# Run (the backend is fixed at build time; pass --assets/--icu/--test-texture)
 ./result-shell/bin/openauto_shell \
-  --backend=wayland \
   --assets=/path/to/flutter_project/build/flutter_assets \
-  --icu=/path/to/flutter_project/build/icudtl.dat
-
-# Run directly on a DRM/KMS display (root privileges required)
-./result-shell/bin/openauto_shell \
-  --backend=kms \
-  --assets=/path/to/flutter_project/build/flutter_assets
+  --icu=/path/to/flutter_project/build/icudtl.dat \
+  --test-texture   # optional demo external-texture producer
 
 # Development shell with toolchain + engine
 nix develop .#
