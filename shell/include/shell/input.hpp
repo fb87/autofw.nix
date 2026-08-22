@@ -29,4 +29,4 @@ struct state
 {
 };
 
-}
+} // namespace shell::input

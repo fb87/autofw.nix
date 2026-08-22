@@ -45,7 +45,7 @@ struct entry
 #ifdef SHELL_RENDERER_GL
     std::uint32_t gl_name{};
     std::uint32_t gl_target{GL_TEXTURE_2D};
-    std::uint32_t gl_format{0x8058};  // GL_RGBA8
+    std::uint32_t gl_format{0x8058}; // GL_RGBA8
 #endif
     std::uint32_t width{};
     std::uint32_t height{};
@@ -82,10 +82,12 @@ inline auto ensure_texture(state& s, id texture_id, std::uint32_t width,
 {
     std::lock_guard lock(s.mutex);
     entry& e = s.map[texture_id];
-    if (e.gl_name == 0) {
+    if (e.gl_name == 0)
+    {
         GLuint name = 0;
         glGenTextures(1, &name);
-        if (name == 0) return false;
+        if (name == 0)
+            return false;
         e.gl_name = name;
         e.gl_target = GL_TEXTURE_2D;
         e.gl_format = 0x8058;
@@ -105,23 +107,27 @@ inline auto ensure_texture(state& s, id texture_id, std::uint32_t width,
 }
 
 inline auto upload_frame(state& s, id texture_id, std::uint32_t width,
-                         std::uint32_t height,
-                         std::span<const std::uint8_t> rgba) -> bool
+                         std::uint32_t height, std::span<const std::uint8_t> rgba)
+    -> bool
 {
-    if (!ensure_texture(s, texture_id, width, height)) return false;
+    if (!ensure_texture(s, texture_id, width, height))
+        return false;
     std::lock_guard lock(s.mutex);
     auto it = s.map.find(texture_id);
-    if (it == s.map.end()) return false;
+    if (it == s.map.end())
+        return false;
     entry& e = it->second;
     glBindTexture(GL_TEXTURE_2D, e.gl_name);
-    if (width != e.width || height != e.height) {
+    if (width != e.width || height != e.height)
+    {
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, static_cast<GLsizei>(width),
                      static_cast<GLsizei>(height), 0, GL_RGBA, GL_UNSIGNED_BYTE,
                      nullptr);
         e.width = width;
         e.height = height;
     }
-    if (!rgba.empty()) {
+    if (!rgba.empty())
+    {
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(width),
                         static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE,
@@ -135,7 +141,8 @@ inline auto get_texture(state& s, id texture_id, gl& out) -> bool
 {
     std::lock_guard lock(s.mutex);
     auto it = s.map.find(texture_id);
-    if (it != s.map.end() && it->second.gl_name != 0) {
+    if (it != s.map.end() && it->second.gl_name != 0)
+    {
         out.name = it->second.gl_name;
         out.width = it->second.width ? it->second.width : 1;
         out.height = it->second.height ? it->second.height : 1;
@@ -151,7 +158,8 @@ inline auto release_texture(state& s, id texture_id) -> void
 {
     std::lock_guard lock(s.mutex);
     auto it = s.map.find(texture_id);
-    if (it != s.map.end() && it->second.gl_name != 0) {
+    if (it != s.map.end() && it->second.gl_name != 0)
+    {
         GLuint name = it->second.gl_name;
         glDeleteTextures(1, &name);
         it->second.gl_name = 0;
@@ -159,10 +167,22 @@ inline auto release_texture(state& s, id texture_id) -> void
     }
 }
 #else
-inline auto ensure_texture(state&, id, std::uint32_t, std::uint32_t) -> bool { return false; }
-inline auto upload_frame(state&, id, std::uint32_t, std::uint32_t, std::span<const std::uint8_t>) -> bool { return false; }
-inline auto get_texture(state&, id, gl&) -> bool { return false; }
-inline auto release_texture(state&, id) -> void {}
-#endif  // SHELL_RENDERER_GL
+inline auto ensure_texture(state&, id, std::uint32_t, std::uint32_t) -> bool
+{
+    return false;
+}
+inline auto upload_frame(state&, id, std::uint32_t, std::uint32_t,
+                         std::span<const std::uint8_t>) -> bool
+{
+    return false;
+}
+inline auto get_texture(state&, id, gl&) -> bool
+{
+    return false;
+}
+inline auto release_texture(state&, id) -> void
+{
+}
+#endif // SHELL_RENDERER_GL
 
-}  // namespace shell::texture
+} // namespace shell::texture

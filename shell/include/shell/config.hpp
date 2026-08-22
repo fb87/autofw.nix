@@ -18,4 +18,4 @@ struct config
     renderer::type renderer{renderer::type::automatic};
 };
 
-}
+} // namespace shell

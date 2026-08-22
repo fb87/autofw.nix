@@ -19,4 +19,4 @@ struct state
     void* gbm_surface{};
 };
 
-}
+} // namespace shell::backend::drm

@@ -27,4 +27,4 @@ struct state
 {
 };
 
-}
+} // namespace shell::plugin

@@ -35,4 +35,4 @@ struct state
     int priority{};
 };
 
-}
+} // namespace shell::stage

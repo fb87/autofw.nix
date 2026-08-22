@@ -42,4 +42,4 @@ struct state
     presenters hosts;
 };
 
-}  // namespace shell::renderer::software
+} // namespace shell::renderer::software

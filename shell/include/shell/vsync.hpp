@@ -10,4 +10,4 @@ struct state
     std::intptr_t baton{};
 };
 
-}
+} // namespace shell::vsync

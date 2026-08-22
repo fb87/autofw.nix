@@ -70,6 +70,6 @@ struct state
     std::uint32_t last_buttons{};
 };
 
-}  // namespace shell::engine
+} // namespace shell::engine
 
 #include <shell/engine_impl.hpp>

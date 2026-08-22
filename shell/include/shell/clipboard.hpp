@@ -31,4 +31,4 @@ inline auto clear(state&) -> result<void>
     return {};
 }
 
-}
+} // namespace shell::shared::clipboard

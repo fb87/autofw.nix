@@ -26,4 +26,4 @@ struct error
     std::string message;
 };
 
-}
+} // namespace shell

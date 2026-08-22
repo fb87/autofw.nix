@@ -7,4 +7,4 @@ struct state
 {
 };
 
-}
+} // namespace shell::shared::selection

@@ -73,20 +73,18 @@ struct state
 
 inline auto start(state&, const request&) -> result<id>
 {
-    return std::unexpected(
-        error{
-            .code = error_code::unavailable,
-            .message = "transition::start is not implemented",
-        });
+    return std::unexpected(error{
+        .code = error_code::unavailable,
+        .message = "transition::start is not implemented",
+    });
 }
 
 inline auto cancel(state&, id) -> result<void>
 {
-    return std::unexpected(
-        error{
-            .code = error_code::unavailable,
-            .message = "transition::cancel is not implemented",
-        });
+    return std::unexpected(error{
+        .code = error_code::unavailable,
+        .message = "transition::cancel is not implemented",
+    });
 }
 
-}
+} // namespace shell::transition

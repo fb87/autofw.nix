@@ -8,4 +8,4 @@ struct state
     int epoll_fd{-1};
 };
 
-}
+} // namespace shell::event

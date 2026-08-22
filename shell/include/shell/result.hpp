@@ -7,7 +7,6 @@
 namespace shell
 {
 
-template<typename T>
-using result = std::expected<T, error>;
+template <typename T> using result = std::expected<T, error>;
 
 }

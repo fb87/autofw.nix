@@ -25,4 +25,4 @@ struct state
     bool visible{};
 };
 
-}
+} // namespace shell::surface

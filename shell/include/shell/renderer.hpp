@@ -15,4 +15,4 @@ struct state
     type selected{type::automatic};
 };
 
-}
+} // namespace shell::renderer

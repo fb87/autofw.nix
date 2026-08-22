@@ -46,4 +46,4 @@ struct state
     input_mode input{input_mode::normal};
 };
 
-}
+} // namespace shell::layer

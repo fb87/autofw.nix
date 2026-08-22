@@ -8,11 +8,8 @@ namespace shell::log
 
 inline void info(std::string_view message)
 {
-    std::fprintf(
-        stderr,
-        "[shell] %.*s\n",
-        static_cast<int>(message.size()),
-        message.data());
+    std::fprintf(stderr, "[shell] %.*s\n", static_cast<int>(message.size()),
+                 message.data());
 }
 
-}
+} // namespace shell::log

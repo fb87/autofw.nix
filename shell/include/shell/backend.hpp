@@ -50,4 +50,4 @@ struct output
     renderer::software::presenters software_present{};
 };
 
-}  // namespace shell::backend
+} // namespace shell::backend

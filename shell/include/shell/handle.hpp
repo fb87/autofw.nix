@@ -5,15 +5,13 @@
 namespace shell
 {
 
-template<typename T, auto Release, T Invalid>
-struct handle
+template <typename T, auto Release, T Invalid> struct handle
 {
     T value{Invalid};
 
     handle() = default;
 
-    explicit handle(T new_value)
-        : value{new_value}
+    explicit handle(T new_value) : value{new_value}
     {
     }
 
@@ -21,14 +19,14 @@ struct handle
 
     auto operator=(const handle&) -> handle& = delete;
 
-    handle(handle&& other) noexcept
-        : value{std::exchange(other.value, Invalid)}
+    handle(handle&& other) noexcept : value{std::exchange(other.value, Invalid)}
     {
     }
 
     auto operator=(handle&& other) noexcept -> handle&
     {
-        if (this == &other) {
+        if (this == &other)
+        {
             return *this;
         }
 
@@ -46,7 +44,8 @@ struct handle
 
     void reset()
     {
-        if (value == Invalid) {
+        if (value == Invalid)
+        {
             return;
         }
 
@@ -61,4 +60,4 @@ struct handle
     }
 };
 
-}
+} // namespace shell
