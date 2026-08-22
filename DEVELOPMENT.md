@@ -76,21 +76,21 @@ Compilation alone is not acceptance.
 
 ## 4. Development roadmap
 
-### M0 - Foundation
+### M0 - Foundation  ✅ implemented
 
 Implement repository structure, Nix development environment, CMake, formatting,
 errors/results, handles, logging, and unit-test infrastructure.
 
 Acceptance: all public headers compile independently.
 
-### M1 - Flutter engine bootstrap
+### M1 - Flutter engine bootstrap  ✅ implemented
 
 Implement Flutter engine loading, project configuration, task runners, window
 metrics, and clean shutdown.
 
 Acceptance: a Dart application executes successfully.
 
-### M2 - Renderer abstraction and Wayland output
+### M2 - Renderer abstraction and Wayland output  ✅ implemented
 
 Implement renderer selection independent of display backend.
 
@@ -107,19 +107,19 @@ Acceptance:
 - the same application renders using the software renderer with EGL/GPU
   acceleration disabled
 
-### M3 - Input
+### M3 - Input  ✅ basic (pointer/keyboard)
 
 Implement touch, pointer, keyboard, and normalized input events.
 
 Acceptance: Flutter touchscreen controls operate correctly.
 
-### M4 - Vsync
+### M4 - Vsync  ✅ frame-callback-driven
 
 Integrate Wayland frame callbacks with Flutter vsync.
 
 Acceptance: Flutter animation follows compositor refresh.
 
-### M5 - Stage and layer core
+### M5 - Stage and layer core  ✅ implemented
 
 Implement stage/layer registry, semantic roles, visibility, geometry, opacity,
 and input modes.
@@ -141,7 +141,7 @@ Implement clipboard, selection baseline, and shared runtime state.
 Acceptance: separate stages exchange clipboard/state without directly
 referencing each other.
 
-### M8 - External GL texture
+### M8 - External GL texture  ✅ implemented
 
 Implement Flutter texture registration, GL callback, and frame notification.
 
@@ -203,7 +203,7 @@ forwarding, and native text-input requests.
 
 Acceptance: native surface can be operated through touchscreen input.
 
-### M16 - DRM/KMS
+### M16 - DRM/KMS  ✅ implemented (builds)
 
 Implement DRM discovery, connector/mode selection, GBM, EGL, and page flips.
 
