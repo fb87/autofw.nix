@@ -442,6 +442,8 @@ void Engine::HandlePathProviderMessage(const FlutterPlatformMessage* message) {
 
 void Engine::SetKeyboardKeymap(int fd, uint32_t size) {
   keyboard_.SetKeymap(fd, size);
+  std::fprintf(stderr, "[oa-engine] keyboard keymap set (fd=%d size=%u)\n", fd,
+               size);
 }
 
 void Engine::SendInputEvent(const InputEvent& event) {

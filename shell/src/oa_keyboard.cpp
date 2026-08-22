@@ -42,6 +42,9 @@ OaKeyResult Keyboard::Translate(uint32_t evdev_keycode, bool pressed) {
   OaKeyResult out;
   out.down = pressed;
   out.physical_hid = EvdevToHid(evdev_keycode);
+  // Flutter rejects key events with physical==0 or logical==0, so always
+  // provide a stable non-zero fallback derived from the HID code.
+  out.logical = 0x00100010000ull | out.physical_hid;
 
   // xkb uses 8 + evdev code as its keycode.
   const xkb_keycode_t xkc = static_cast<xkb_keycode_t>(evdev_keycode) + 8;
