@@ -1,9 +1,9 @@
-#include <flshell/flshell.hpp>
+#include <shell/shell.hpp>
 
 int main()
 {
-    flshell::layer::state layer{};
-    flshell::stage::state stage{};
+    shell::layer::state layer{};
+    shell::stage::state stage{};
 
     return (layer.value == 0 && stage.value == 0) ? 0 : 1;
 }

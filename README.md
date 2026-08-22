@@ -7,7 +7,7 @@ or a **DRM/KMS** framebuffer, without copying any of the reference embedders
 
 ```
 ┌─────────────────────────────────────────────┐
-│               flshell_app                │
+│               shell_app                │
 │                                             │
 │  ┌────────────┐       ┌─────────────────┐   │
 │  │ Flutter    │  EGL/ │   Wayland or    │   │
@@ -40,7 +40,7 @@ The framework lives under `shell/include/shell/` (umbrella `shell.hpp`):
 - `protocol/` — generated Wayland `xdg-shell` bindings.
 
 Runnable app: `shell/src/main.cpp` (Wayland) with `--test-texture` demo
-producer. `flake.nix` builds it as `.#shell` (`flshell-app`).
+producer. `flake.nix` builds it as `.#shell` (`shell-app`).
 
 ## Backends
 
@@ -64,16 +64,36 @@ The engine only depends on EGL under `SHELL_RENDERER_GL`; a software-only build
 omits it. Choose at runtime with `--renderer=gl|software`.
 
 ```sh
-./result-shell/bin/flshell_app --assets=APP --icu=ICU --renderer=software
+./result-shell/bin/shell_app --assets=APP --icu=ICU --renderer=software
 ```
 
 ## Build & run
 
+Backend and renderer are selected at **build time** via CMake `OA_BACKEND` /
+`OA_RENDERER` (or the flake packages below). Supported combinations:
+
+```text
+wayland + gl        # default; xdg-shell + EGL/GLES
+wayland + software  # xdg-shell + wl_shm CPU buffers
+drm + gl            # DRM/KMS + GBM + EGL/GLES (runtime pending)
+drm + software      # DRM/KMS + CPU dumb buffers (runtime pending)
+```
+
 ```sh
-nix build .#shell   # builds flshell-app (Wayland)
+nix build .#shell                  # wayland + gl (default)
+nix build .#shell-wayland-software
+nix build .#shell-drm              # builds; drm runtime pending
+nix build .#shell-drm-software     # builds; drm runtime pending
+```
+
+Un-built CMake equivalent: `-DOA_BACKEND=wayland -DOA_RENDERER=software`.
+
+
+```sh
+nix build .#shell   # builds shell-app (Wayland)
 
 # Run
-./result-shell/bin/flshell_app \
+./result-shell/bin/shell_app \
   --assets=/path/to/flutter_project/build/flutter_assets \
   --icu=/path/to/flutter_project/build/icudtl.dat \
   --test-texture   # optional demo external-texture producer
@@ -93,7 +113,7 @@ The shell was verified end-to-end on a live Wayland compositor by building a
 small animated sample app and running it with:
 
 ```sh
-./result-shell/bin/flshell_app \
+./result-shell/bin/shell_app \
   --assets=/path/to/app/build/flutter_assets --icu=.../icudtl.dat --test-texture
 ```
 
@@ -166,5 +186,5 @@ id `1001` and pushes an animated gradient + moving bar at ~30 fps). The sample
 app shows it on the "ExtTexture" panel.
 
 ```sh
-./result-shell/bin/flshell_app --assets=APP_ASSETS --icu=ICU --test-texture
+./result-shell/bin/shell_app --assets=APP_ASSETS --icu=ICU --test-texture
 ```

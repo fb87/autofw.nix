@@ -1,6 +1,6 @@
-// flshell main -- a minimal Flutter embedder shell (Wayland backend).
+// shell main -- a minimal Flutter embedder shell (Wayland backend).
 //
-// Header-only flshell framework: builds backend::wayland + engine::state and
+// Header-only shell framework: builds backend::wayland + engine::state and
 // runs a Flutter app.
 #include <cstdio>
 #include <getopt.h>
@@ -11,7 +11,9 @@
 #include <shell/shell.hpp>
 #include <shell/engine.hpp>
 #include <shell/renderer.hpp>
+#ifdef SHELL_BACKEND_WAYLAND
 #include <shell/backend/wayland.hpp>
+#endif
 
 namespace
 {
@@ -100,11 +102,11 @@ int main(int argc, char** argv)
     }
     if (opts.icu.empty()) opts.icu = opts.assets + "/icudtl.dat";
 
-    shell::backend::wayland::config cfg{
-        .display = {},
-        .width = 1280,
-        .height = 720,
-    };
+    // Build the display backend selected at build time (SHELL_BACKEND_WAYLAND
+    // or SHELL_BACKEND_DRM) and expose it through the backend-agnostic
+    // `shell::backend::output` interface. The engine never sees backend types.
+#ifdef SHELL_BACKEND_WAYLAND
+    shell::backend::wayland::config cfg{.display = {}, .width = 1280, .height = 720};
     shell::backend::wayland::state backend = shell::backend::wayland::create(cfg);
 
     if (auto err = shell::backend::wayland::connect(backend); !err) {
@@ -119,11 +121,7 @@ int main(int argc, char** argv)
         shell::log::info("wayland surface setup failed");
         return 1;
     }
-
-    // Expose the Wayland backend through the backend-agnostic output interface;
-    // the engine only ever sees this, never backend::wayland types.
     shell::backend::output out = shell::backend::wayland::output::take(backend);
-
     shell::engine::state engine;
     shell::renderer::type rtype = shell::renderer::type::automatic;
     if (opts.renderer == "software") rtype = shell::renderer::type::software;
@@ -170,4 +168,10 @@ int main(int argc, char** argv)
     shell::engine::destroy(engine);
     shell::backend::wayland::destroy(backend);
     return 0;
+#else
+    // DRM/KMS backend not yet implemented; the build config selects it but the
+    // runtime path is pending.
+    shell::log::info("DRM/KMS backend is not implemented yet");
+    return 1;
+#endif
 }

@@ -1,21 +1,21 @@
-#include <flshell/flshell.hpp>
+#include <shell/shell.hpp>
 
 int main()
 {
-    flshell::stage::state main_stage{
+    shell::stage::state main_stage{
         .value = 1,
         .size = {
             .width = 1280,
             .height = 720,
         },
         .view = {
-            .state = flshell::stage::visibility::visible,
+            .state = shell::stage::visibility::visible,
             .progress = 1.0F,
         },
         .priority = 100,
     };
 
-    flshell::log::info("flshell baseline");
+    shell::log::info("shell baseline");
 
     return main_stage.value == 1 ? 0 : 1;
 }

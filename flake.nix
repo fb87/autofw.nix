@@ -58,29 +58,39 @@
           '';
         };
 
-        # The flshell-baseline-aligned shell app (Wayland backend).
-        shell = pkgs.stdenv.mkDerivation {
-          pname = "flshell-app";
-          version = "0.1.0";
-          src = ./shell;
-          nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.ninja ];
-          buildInputs = [
-            pkgs.libGL.dev
-            pkgs.wayland
-            pkgs.libffi
-            pkgs.libxkbcommon
-            flutter-engine
-          ];
-          cmakeFlags = [
-            "-DCMAKE_BUILD_TYPE=Release"
-            "-DCMAKE_INSTALL_PREFIX=${placeholder "out"}"
-            "-DFLUTTER_ENGINE_ROOT=${flutter-engine}"
-          ];
-        };
+        # The shell app, parameterized by display backend and renderer.
+        shellFor = backend: renderer:
+          pkgs.stdenv.mkDerivation {
+            pname = "shell-${backend}-${renderer}";
+            version = "0.1.0";
+            src = ./shell;
+            nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.ninja ];
+            buildInputs = [
+              pkgs.libGL.dev
+              pkgs.wayland
+              pkgs.libdrm
+              pkgs.libgbm
+              pkgs.libffi
+              pkgs.libxkbcommon
+              flutter-engine
+            ];
+            cmakeFlags = [
+              "-DCMAKE_BUILD_TYPE=Release"
+              "-DCMAKE_INSTALL_PREFIX=${placeholder "out"}"
+              "-DFLUTTER_ENGINE_ROOT=${flutter-engine}"
+              "-DOA_BACKEND=${backend}"
+              "-DOA_RENDERER=${renderer}"
+            ];
+          };
+
+        shell = shellFor "wayland" "gl";
+        shell-wayland-software = shellFor "wayland" "software";
+        shell-drm = shellFor "drm" "gl";
+        shell-drm-software = shellFor "drm" "software";
       in {
         flutter-engine = flutter-engine;
         default = flutter-engine;
-        shell = shell;
+        inherit shell shell-wayland-software shell-drm shell-drm-software;
       };
     }) supportedSystems);
 

@@ -5,7 +5,9 @@
 #include <span>
 #include <unordered_map>
 
+#ifdef SHELL_RENDERER_GL
 #include <GLES2/gl2.h>
+#endif
 
 #include <shell/handle.hpp>
 #include <shell/result.hpp>
@@ -40,9 +42,11 @@ struct dmabuf
 
 struct entry
 {
+#ifdef SHELL_RENDERER_GL
     std::uint32_t gl_name{};
     std::uint32_t gl_target{GL_TEXTURE_2D};
     std::uint32_t gl_format{0x8058};  // GL_RGBA8
+#endif
     std::uint32_t width{};
     std::uint32_t height{};
     bool ready{};
@@ -72,6 +76,7 @@ inline auto has(state& s, id texture_id) -> bool
     return s.map.contains(texture_id);
 }
 
+#ifdef SHELL_RENDERER_GL
 inline auto ensure_texture(state& s, id texture_id, std::uint32_t width,
                            std::uint32_t height) -> bool
 {
@@ -153,5 +158,11 @@ inline auto release_texture(state& s, id texture_id) -> void
         it->second.ready = false;
     }
 }
+#else
+inline auto ensure_texture(state&, id, std::uint32_t, std::uint32_t) -> bool { return false; }
+inline auto upload_frame(state&, id, std::uint32_t, std::uint32_t, std::span<const std::uint8_t>) -> bool { return false; }
+inline auto get_texture(state&, id, gl&) -> bool { return false; }
+inline auto release_texture(state&, id) -> void {}
+#endif  // SHELL_RENDERER_GL
 
 }  // namespace shell::texture

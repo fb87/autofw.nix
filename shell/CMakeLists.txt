@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(flshell_app LANGUAGES C CXX)
+project(shell_app LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -7,6 +7,21 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
+
+# ---------------------------------------------------------------------------
+# Build configuration.
+#
+#   OA_BACKEND   display backend        : wayland (default) | drm
+#   OA_RENDERER  renderer               : gl (default) | software
+#
+# Supported combinations:
+#   wayland+gl      Wayland + EGL/OpenGL ES
+#   wayland+software Wayland + wl_shm CPU buffers
+#   drm+gl          DRM/KMS + GBM + EGL/OpenGL ES
+#   drm+software    DRM/KMS + CPU dumb buffers
+# ---------------------------------------------------------------------------
+set(OA_BACKEND "wayland" CACHE STRING "Display backend: wayland | drm")
+set(OA_RENDERER "gl" CACHE STRING "Renderer: gl | software")
 
 # Flutter embedder library + headers.
 if(NOT DEFINED FLUTTER_ENGINE_ROOT)
@@ -22,7 +37,6 @@ find_library(FLUTTER_ENGINE_LIBRARY flutter_engine
   PATHS "${FLUTTER_ENGINE_ROOT}/lib")
 
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-egl)
 pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 find_path(EGL_INCLUDE_DIR NAMES EGL/egl.h)
 find_library(EGL_LIBRARY NAMES EGL libEGL)
@@ -35,15 +49,48 @@ add_library(shell_impl INTERFACE)
 target_include_directories(shell_impl INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${FLUTTER_EMBEDDER_INCLUDE_DIR} ${EGL_INCLUDE_DIR} ${GLES2_INCLUDE_DIR})
-# Accelerated (EGL/OpenGL ES) renderer is compiled in by default.
-target_compile_definitions(shell_impl INTERFACE SHELL_RENDERER_GL=1)
 target_link_libraries(shell_impl INTERFACE
-  ${FLUTTER_ENGINE_LIBRARY} ${EGL_LIBRARY} ${GLES2_LIBRARY}
-  PkgConfig::WAYLAND PkgConfig::XKBCOMMON)
+  ${FLUTTER_ENGINE_LIBRARY} PkgConfig::XKBCOMMON)
 
-add_executable(flshell_app
-  src/main.cpp
-  include/shell/protocol/xdg-shell-protocol.c)
-target_link_libraries(flshell_app PRIVATE shell_impl ${CMAKE_DL_LIBS} pthread)
+# --- backend selection -----------------------------------------------------
+if(OA_BACKEND STREQUAL "wayland")
+  pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-egl)
+  target_compile_definitions(shell_impl INTERFACE SHELL_BACKEND_WAYLAND=1)
+  target_link_libraries(shell_impl INTERFACE PkgConfig::WAYLAND)
+elseif(OA_BACKEND STREQUAL "drm")
+  find_path(GBM_INCLUDE_DIR NAMES gbm.h)
+  find_library(GBM_LIBRARY NAMES gbm)
+  find_path(DRM_MODESET_INCLUDE_DIR NAMES xf86drmMode.h)
+  find_path(DRM_CORE_INCLUDE_DIR NAMES drm.h PATHS "${DRM_MODESET_INCLUDE_DIR}/.."
+            PATH_SUFFIXES libdrm)
+  find_library(DRM_LIBRARY NAMES drm libdrm)
+  if(NOT GBM_LIBRARY OR NOT DRM_LIBRARY)
+    message(FATAL_ERROR "drm backend requested but gbm/libdrm not found")
+  endif()
+  target_compile_definitions(shell_impl INTERFACE SHELL_BACKEND_DRM=1)
+  target_include_directories(shell_impl INTERFACE
+    ${GBM_INCLUDE_DIR} ${DRM_MODESET_INCLUDE_DIR} ${DRM_CORE_INCLUDE_DIR})
+  target_link_libraries(shell_impl INTERFACE ${GBM_LIBRARY} ${DRM_LIBRARY})
+else()
+  message(FATAL_ERROR "Unknown OA_BACKEND '${OA_BACKEND}'")
+endif()
 
-install(TARGETS flshell_app RUNTIME DESTINATION bin)
+# --- renderer selection ------------------------------------------------------
+if(OA_RENDERER STREQUAL "gl")
+  target_compile_definitions(shell_impl INTERFACE SHELL_RENDERER_GL=1)
+  target_link_libraries(shell_impl INTERFACE ${EGL_LIBRARY} ${GLES2_LIBRARY})
+elseif(OA_RENDERER STREQUAL "software")
+  # no EGL/GLES needed
+else()
+  message(FATAL_ERROR "Unknown OA_RENDERER '${OA_RENDERER}'")
+endif()
+
+set(SHELL_APP_SOURCES src/main.cpp)
+if(OA_BACKEND STREQUAL "wayland")
+  # Wayland xdg-shell generated bindings.
+  list(APPEND SHELL_APP_SOURCES include/shell/protocol/xdg-shell-protocol.c)
+endif()
+add_executable(shell_app ${SHELL_APP_SOURCES})
+target_link_libraries(shell_app PRIVATE shell_impl ${CMAKE_DL_LIBS} pthread)
+
+install(TARGETS shell_app RUNTIME DESTINATION bin)

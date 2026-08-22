@@ -313,6 +313,11 @@ inline auto connect(state& s) -> result<void>
 
 inline auto setup_egl(state& s) -> result<void>
 {
+#ifndef SHELL_RENDERER_GL
+    // Software rendering does not need an EGL display.
+    (void)s;
+    return {};
+#else
     static const EGLAttrib kAttribs[] = {EGL_NONE};
     s.egl.display =
         eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_EXT, s.display, kAttribs);
@@ -322,6 +327,7 @@ inline auto setup_egl(state& s) -> result<void>
     }
     return egl::choose_config(static_cast<EGLDisplay>(s.egl.display),
                               static_cast<EGLConfig*>(&s.egl.config));
+#endif
 }
 
 inline auto setup_surface(state& s) -> result<void>
@@ -340,6 +346,7 @@ inline auto setup_surface(state& s) -> result<void>
     wl_surface_commit(s.surface);
     wl_display_roundtrip(s.display);
 
+#ifdef SHELL_RENDERER_GL
     s.wl_window = wl_egl_window_create(s.surface, static_cast<int>(s.width),
                                        static_cast<int>(s.height));
     if (!s.wl_window) {
@@ -352,6 +359,9 @@ inline auto setup_surface(state& s) -> result<void>
     if (s.egl.surface == EGL_NO_SURFACE) {
         return std::unexpected(error{.code = error_code::egl, .message = "egl window surface"});
     }
+#else
+    // Software rendering presents via wl_shm buffers on s.surface.
+#endif
     return {};
 }
 
@@ -385,19 +395,29 @@ inline auto stop(state& s) -> void { s.running = false; }
 
 inline auto swap(state& s) -> bool
 {
+#ifdef SHELL_RENDERER_GL
     return eglSwapBuffers(static_cast<EGLDisplay>(s.egl.display),
                           static_cast<EGLSurface>(s.egl.surface)) == EGL_TRUE;
+#else
+    // Software present already committed the wl_shm buffer.
+    (void)s;
+    return true;
+#endif
 }
 
 inline auto destroy(state& s) -> void
 {
+#ifdef SHELL_RENDERER_GL
     if (s.egl.surface) {
         eglDestroySurface(static_cast<EGLDisplay>(s.egl.display),
                           static_cast<EGLSurface>(s.egl.surface));
     }
     if (s.wl_window) wl_egl_window_destroy(s.wl_window);
+#endif
     if (s.surface) wl_surface_destroy(s.surface);
+#ifdef SHELL_RENDERER_GL
     if (s.egl.display) eglTerminate(static_cast<EGLDisplay>(s.egl.display));
+#endif
     if (s.display) wl_display_disconnect(s.display);
 }
 
@@ -450,9 +470,9 @@ inline bool software_present(void* d, const renderer::software::buffer& frame)
     std::size_t size = static_cast<std::size_t>(frame.stride) * frame.height;
 
     // Create an anonymous shared-memory file sized for the frame.
-    int fd = static_cast<int>(memfd_create("flshell-shm", 0));
+    int fd = static_cast<int>(memfd_create("shell-shm", 0));
     if (fd < 0) {
-        fd = ::shm_open("/flshell-shm", O_RDWR | O_CREAT, 0600);
+        fd = ::shm_open("/shell-shm", O_RDWR | O_CREAT, 0600);
         if (fd < 0) return false;
     }
     if (ftruncate(fd, static_cast<off_t>(size)) < 0) { ::close(fd); return false; }

@@ -373,6 +373,7 @@ inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,
 
 namespace detail
 {
+#ifdef SHELL_RENDERER_GL
 bool external_texture_frame(void* d, std::int64_t id, std::size_t, std::size_t,
                             FlutterOpenGLTexture* out)
 {
@@ -391,6 +392,10 @@ bool external_texture_frame(void* d, std::int64_t id, std::size_t, std::size_t,
     out->destruction_callback = nullptr;
     return true;
 }
+#else
+bool external_texture_frame(void*, std::int64_t, std::size_t, std::size_t,
+                            FlutterOpenGLTexture*) { return false; }
+#endif
 
 void on_platform_message(const FlutterPlatformMessage* m, void* d)
 {
