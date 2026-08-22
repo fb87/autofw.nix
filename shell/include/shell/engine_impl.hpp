@@ -12,8 +12,8 @@ namespace detail
 bool make_current(void* d)
 {
     auto* s = static_cast<state*>(d);
-    EGLDisplay dpy = static_cast<EGLDisplay>(s->wl->egl.display);
-    EGLSurface surf = static_cast<EGLSurface>(s->wl->egl.surface);
+    EGLDisplay dpy = static_cast<EGLDisplay>(s->out->egl_display);
+    EGLSurface surf = static_cast<EGLSurface>(s->out->egl_surface);
     if (surf == EGL_NO_SURFACE || dpy == EGL_NO_DISPLAY || s->gl_ctx == EGL_NO_CONTEXT)
         return false;
     eglBindAPI(EGL_OPENGL_ES_API);
@@ -27,14 +27,14 @@ bool clear_current(void*)
     return eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) == EGL_TRUE;
 }
 
-bool present(void* d) { return backend::wayland::swap(*static_cast<state*>(d)->wl); }
+bool present(void* d) { return static_cast<state*>(d)->out->present(static_cast<state*>(d)->out->state); }
 
 std::uint32_t fbo(void*) { return 0; }
 
 bool make_resource_current(void* d)
 {
     auto* s = static_cast<state*>(d);
-    EGLDisplay dpy = static_cast<EGLDisplay>(s->wl->egl.display);
+    EGLDisplay dpy = static_cast<EGLDisplay>(s->out->egl_display);
     eglBindAPI(EGL_OPENGL_ES_API);
     return eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, s->resource_ctx) == EGL_TRUE;
 }
@@ -128,8 +128,8 @@ inline auto stop_runner(state& s) -> void
 
 inline auto init(state& s) -> result<void>
 {
-    EGLDisplay dpy = static_cast<EGLDisplay>(s.wl->egl.display);
-    EGLConfig cfg = static_cast<EGLConfig>(s.wl->egl.config);
+    EGLDisplay dpy = static_cast<EGLDisplay>(s.out->egl_display);
+    EGLConfig cfg = static_cast<EGLConfig>(s.out->egl_config);
     s.gl_ctx = egl::create_context(dpy, cfg, EGL_NO_CONTEXT);
     if (s.gl_ctx == EGL_NO_CONTEXT) {
         return std::unexpected(error{.code = error_code::egl, .message = "gl context"});
@@ -191,16 +191,16 @@ inline auto init(state& s) -> result<void>
     display.struct_size = sizeof(display);
     display.single_display = true;
     display.refresh_rate = 60.0;
-    display.width = s.wl->width;
-    display.height = s.wl->height;
-    display.device_pixel_ratio = s.wl->dpi;
+    display.width = s.out->width;
+    display.height = s.out->height;
+    display.device_pixel_ratio = s.out->pixel_ratio;
     FlutterEngineNotifyDisplayUpdate(fl, kFlutterEngineDisplaysUpdateTypeStartup, &display, 1);
 
     FlutterWindowMetricsEvent m = {};
     m.struct_size = sizeof(m);
-    m.width = s.wl->width;
-    m.height = s.wl->height;
-    m.pixel_ratio = s.wl->dpi;
+    m.width = s.out->width;
+    m.height = s.out->height;
+    m.pixel_ratio = s.out->pixel_ratio;
     m.view_id = 0;
     FlutterEngineSendWindowMetricsEvent(fl, &m);
     FlutterEngineScheduleFrame(fl);
@@ -274,13 +274,13 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
 
 inline void on_resize(state& s, std::uint32_t width, std::uint32_t height)
 {
-    s.wl->width = width;
-    s.wl->height = height;
+    s.out->width = width;
+    s.out->height = height;
     FlutterWindowMetricsEvent m = {};
     m.struct_size = sizeof(m);
     m.width = width;
     m.height = height;
-    m.pixel_ratio = s.wl->dpi;
+    m.pixel_ratio = s.out->pixel_ratio;
     m.view_id = 0;
     FlutterEngineSendWindowMetricsEvent(s.fl, &m);
 }
@@ -290,7 +290,7 @@ inline void on_keymap(state& s, int fd, std::uint32_t size)
     keyboard::set_keymap(s.kb, fd, size);
 }
 
-inline void on_close(state& s) { backend::wayland::stop(*s.wl); }
+inline void on_close(state& s) { s.out->stop(s.out->state); }
 
 // --- external textures ---------------------------------------------------------
 inline auto register_texture(state& s, texture::id id) -> result<void>
@@ -314,7 +314,7 @@ inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,
                                std::uint32_t h, std::span<const std::uint8_t> rgba) -> bool
 {
     if (!texture::has(s.textures, id)) return false;
-    EGLDisplay dpy = static_cast<EGLDisplay>(s.wl->egl.display);
+    EGLDisplay dpy = static_cast<EGLDisplay>(s.out->egl_display);
     eglBindAPI(EGL_OPENGL_ES_API);
     bool ok = eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, s.upload_ctx) == EGL_TRUE;
     if (ok) {

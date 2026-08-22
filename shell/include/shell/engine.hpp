@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -17,7 +18,7 @@
 
 #include <flutter_embedder.h>
 
-#include <shell/backend/wayland.hpp>
+#include <shell/backend.hpp>
 #include <shell/egl.hpp>
 #include <shell/error.hpp>
 #include <shell/input.hpp>
@@ -35,12 +36,14 @@ struct config
     std::string_view icu_data;
 };
 
-// Minimal platform task runner so Flutter can deliver platform-message and key
-// callbacks on a dedicated thread while the platform thread runs the loop.
+// The Flutter engine wrapper.
+//
+// Depends only on the backend-agnostic `shell::backend::output` interface so
+// it can run on top of Wayland or DRM/KMS without pulling in backend headers.
 struct state
 {
     config cfg;
-    backend::wayland::state* wl{};
+    backend::output* out{};
 
     FlutterEngine fl{};
     EGLContext gl_ctx{EGL_NO_CONTEXT};

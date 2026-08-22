@@ -391,4 +391,32 @@ inline auto destroy(state& s) -> void
     if (s.display) wl_display_disconnect(s.display);
 }
 
+// ---- generic output adapter -------------------------------------------------
+// Expose this Wayland backend through the backend-agnostic `shell::backend::output`
+// interface so the engine can run without depending on Wayland headers.
+namespace output
+{
+inline bool present(void* d)
+{
+    return shell::backend::wayland::swap(*static_cast<shell::backend::wayland::state*>(d));
+}
+inline void stop(void* d)
+{
+    shell::backend::wayland::stop(*static_cast<shell::backend::wayland::state*>(d));
+}
+inline auto take(shell::backend::wayland::state& s) -> shell::backend::output
+{
+    shell::backend::output o{};
+    o.state = &s;
+    o.egl_display = s.egl.display;
+    o.egl_config = s.egl.config;
+    o.egl_surface = s.egl.surface;
+    o.width = s.width;
+    o.height = s.height;
+    o.pixel_ratio = s.dpi;
+    o.present = &present;
+    o.stop = &stop;
+    return o;
+}
+}  // namespace output
 }  // namespace shell::backend::wayland

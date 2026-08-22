@@ -115,9 +115,13 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    // Expose the Wayland backend through the backend-agnostic output interface;
+    // the engine only ever sees this, never backend::wayland types.
+    shell::backend::output out = shell::backend::wayland::output::take(backend);
+
     shell::engine::state engine;
     engine.cfg = shell::engine::config{.assets = opts.assets, .icu_data = opts.icu};
-    engine.wl = &backend;
+    engine.out = &out;
 
     if (auto err = shell::engine::init(engine); !err) {
         shell::log::info("engine init failed");
