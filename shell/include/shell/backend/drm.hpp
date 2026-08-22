@@ -14,6 +14,8 @@
 #include <cstring>
 #include <fcntl.h>
 #include <functional>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 
 #include <gbm.h>
 #include <xf86drm.h>
@@ -48,6 +50,14 @@ struct callbacks
     std::function<void()> on_close;
 };
 
+struct dumb_buf
+{
+    std::uint32_t handle{};
+    std::uint32_t fb_id{};
+    void* map{};
+    std::size_t size{};
+};
+
 struct state
 {
     config cfg;
@@ -69,6 +79,11 @@ struct state
     bool running{};
     bool configured{};
     std::uint32_t fb_id{};
+
+    // Software (CPU) scanout buffers: double-buffered dumb buffers.
+    std::uint32_t dumb_stride{};
+    dumb_buf dumb[2];
+    std::uint32_t dumb_index{};
 
     callbacks cb;
 };
@@ -214,6 +229,14 @@ inline auto connect(state& s) -> result<void>
     return {};
 }
 
+// Flip-complete handler: the compositor has scanned out the presented buffer;
+// that physical refresh is the vsync the engine should follow (M19).
+inline void on_flip_complete(int, unsigned int, unsigned int, unsigned int, void* d)
+{
+    auto* s = static_cast<state*>(d);
+    if (s->cb.on_vsync) s->cb.on_vsync();
+}
+
 inline void run(state& s)
 {
     s.running = true;
@@ -228,11 +251,12 @@ inline void run(state& s)
         int rc = poll(&pfd, 1, 100);
         if (rc > 0)
         {
+            // Handle DRM events, signalling vsync only on a completed
+            // page flip (the display's physical refresh boundary).
             drmEventContext ev{};
+            ev.version = DRM_EVENT_CONTEXT_VERSION;
+            ev.page_flip_handler = on_flip_complete;
             drmHandleEvent(s.fd, &ev);
-            // A page flip completed: signal one vsync to the engine.
-            if (s.cb.on_vsync)
-                s.cb.on_vsync();
         }
     }
 }
@@ -269,6 +293,18 @@ inline auto swap(state& s) -> bool
 
 inline void destroy(state& s)
 {
+    // Release software dumb buffers.
+    for (auto& buf : s.dumb)
+    {
+        if (buf.map) munmap(buf.map, buf.size);
+        if (buf.fb_id) drmModeRmFB(s.fd, buf.fb_id);
+        if (buf.handle)
+        {
+            drm_mode_destroy_dumb req{};
+            req.handle = buf.handle;
+            drmIoctl(s.fd, DRM_IOCTL_MODE_DESTROY_DUMB, &req);
+        }
+    }
     if (s.fb_id)
         drmModeRmFB(s.fd, s.fb_id);
 #ifdef SHELL_RENDERER_GL
@@ -286,6 +322,79 @@ inline void destroy(state& s)
         gbm_device_destroy(s.gbm_dev);
     if (s.fd >= 0)
         close(s.fd);
+}
+
+// ---- software (CPU dumb buffer) presentation --------------------------------
+inline auto setup_dumb_buffers(state& s) -> result<void>
+{
+    if (s.dumb[0].fb_id != 0) return {};
+    for (auto& buf : s.dumb)
+    {
+        drm_mode_create_dumb req{};
+        req.width = s.width;
+        req.height = s.height;
+        req.bpp = 32;
+        if (drmIoctl(s.fd, DRM_IOCTL_MODE_CREATE_DUMB, &req) < 0)
+            return std::unexpected(error{.code = error_code::drm,
+                                         .message = "create dumb buffer"});
+        buf.handle = req.handle;
+        s.dumb_stride = req.pitch;
+        buf.size = static_cast<std::size_t>(req.size);
+        drm_mode_map_dumb mp{};
+        mp.handle = buf.handle;
+        if (drmIoctl(s.fd, DRM_IOCTL_MODE_MAP_DUMB, &mp) < 0)
+            return std::unexpected(error{.code = error_code::drm,
+                                         .message = "map dumb buffer"});
+        buf.map = mmap(nullptr, buf.size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                       s.fd, mp.offset);
+        if (buf.map == MAP_FAILED)
+            return std::unexpected(error{.code = error_code::drm,
+                                         .message = "mmap dumb buffer"});
+        if (drmModeAddFB(s.fd, s.width, s.height, 24, 32, s.dumb_stride,
+                         buf.handle, &buf.fb_id) != 0)
+            return std::unexpected(error{.code = error_code::drm,
+                                         .message = "add dumb fb"});
+    }
+    return {};
+}
+
+inline bool software_present(state& s, const renderer::software::buffer& frame)
+{
+    auto& buf = s.dumb[s.dumb_index & 1];
+    if (buf.map == nullptr)
+    {
+        if (!setup_dumb_buffers(s)) return false;
+        buf = s.dumb[0];
+        s.dumb_index = 1;
+    }
+    auto* dst = static_cast<std::uint8_t*>(buf.map);
+    const auto* src =
+        reinterpret_cast<const std::uint8_t*>(frame.pixels.data());
+    std::uint32_t copy_w = frame.width < s.width ? frame.width : s.width;
+    std::uint32_t copy_h = frame.height < s.height ? frame.height : s.height;
+    for (std::uint32_t y = 0; y < copy_h; ++y)
+    {
+        std::memcpy(dst + static_cast<std::size_t>(y) * s.dumb_stride,
+                    src + static_cast<std::size_t>(y) * frame.stride,
+                    static_cast<std::size_t>(copy_w) * 4);
+    }
+    if (drmModePageFlip(s.fd, s.crtc_id, buf.fb_id, DRM_MODE_PAGE_FLIP_EVENT,
+                        nullptr) != 0)
+    {
+        drmModeSetCrtc(s.fd, s.crtc_id, buf.fb_id, 0, 0, &s.connector_id, 1,
+                       &s.mode);
+    }
+    s.dumb_index++;
+    // Signalled via the page-flip event in run().
+    return true;
+}
+
+namespace
+{
+inline bool drm_software_present_cb(void* d, const renderer::software::buffer& frame)
+{
+    return software_present(*static_cast<shell::backend::drm::state*>(d), frame);
+}
 }
 
 // ---- generic output adapter ------------------------------------------------
@@ -311,7 +420,8 @@ inline auto take(shell::backend::drm::state& s) -> shell::backend::output
     o.pixel_ratio = s.dpi;
     o.present = &present;
     o.stop = &stop;
-    o.software_present.present = nullptr; // DRM software (M17) pending
+    o.software_present.output = &s;
+    o.software_present.present = &drm_software_present_cb;
     return o;
 }
 } // namespace output
