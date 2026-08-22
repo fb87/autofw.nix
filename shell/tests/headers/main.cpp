@@ -61,10 +61,11 @@ int test_transitions()
         return 1;
     if (shell::transition::get(t, *id) == nullptr)
         return 1;
-    // Advance until complete.
-    for (int i = 0; i < 20; ++i)
-        if (!shell::transition::advance(t, *id))
-            break;
+    // Advance until complete (the transition duration is 10 ms; give the wall
+    // clock time to elapse by looping with a healthy cap).
+    for (int i = 0; i < 100000 && shell::transition::advance(t, *id); ++i)
+    {
+    }
     auto* a = shell::transition::get(t, *id);
     if (a == nullptr || a->phase != shell::transition::status::completed)
         return 1;

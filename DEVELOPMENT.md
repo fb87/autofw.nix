@@ -126,7 +126,7 @@ and input modes.
 
 Acceptance: Flutter renders a stage containing independently controlled layers.
 
-### M6 - Transition core
+### M6 - Transition core  ✅ implemented
 
 Implement transition requests, targets, priority, interruption, cancellation,
 and presentation state.
@@ -134,7 +134,7 @@ and presentation state.
 Acceptance: Home -> Media can be interrupted by a higher-priority Rear Camera
 transition.
 
-### M7 - Shared services
+### M7 - Shared services  ✅ implemented
 
 Implement clipboard, selection baseline, and shared runtime state.
 
@@ -147,7 +147,7 @@ Implement Flutter texture registration, GL callback, and frame notification.
 
 Acceptance: native GL renderer appears inside Flutter.
 
-### M9 - Native rendering capability negotiation
+### M9 - Native rendering capability negotiation  ✅ implemented
 
 Implement plugin/native-surface renderer capability negotiation for:
 
@@ -160,28 +160,28 @@ cpu_buffer
 Acceptance: incompatible GPU-only plugins are rejected cleanly in software
 mode, while CPU-capable plugins remain usable.
 
-### M10 - DMA-BUF
+### M10 - DMA-BUF  ✅ EGLImage import (accelerated)
 
 Implement EGLImage import, modifiers, multi-plane representation, and explicit
 lifetime rules.
 
 Acceptance: native DMA-BUF producer renders without CPU framebuffer copy.
 
-### M11 - Surface
+### M11 - Surface  ✅ implemented (registry)
 
 Implement surface -> texture -> Flutter NativeSurface integration.
 
 Acceptance: a native surface can be attached to a layer, shown, hidden,
 resized, and moved.
 
-### M12 - Native plugin ABI
+### M12 - Native plugin ABI  ✅ ABI validation + functional registry
 
 Implement plugin ABI, host API, dlopen, ABI validation, and plugin fd
 integration.
 
 Acceptance: external shared library creates and updates a NativeSurface.
 
-### M13 - Flutter feature plugins
+### M13 - Flutter feature plugins  ✅ registry (C++ side)
 
 Implement `ShellPlugin`, registry, manifest integration, navigation, and
 stage/layer placement.
@@ -189,14 +189,14 @@ stage/layer placement.
 Acceptance: product features can be selected through the Flutter plugin
 registry.
 
-### M14 - Virtual keyboard
+### M14 - Virtual keyboard  ✅ IME bridge (C++ side)
 
 Implement keyboard layer, Flutter keyboard, IME bridge, show/hide, text commit,
 delete, selection, and action keys.
 
 Acceptance: touch-only operation can enter text into Flutter fields.
 
-### M15 - Native input
+### M15 - Native input  ✅ input source routing
 
 Implement NativeSurface hit routing, coordinate transformation, pointer
 forwarding, and native text-input requests.
@@ -210,7 +210,7 @@ Implement DRM discovery, connector/mode selection, GBM, EGL, and page flips.
 Acceptance: the same meta-application runs directly on DRM/KMS.
 
 
-### M17 - DRM/KMS software rendering
+### M17 - DRM/KMS software rendering  ✅ dumb buffers
 
 Implement:
 
@@ -223,19 +223,19 @@ Acceptance: the same Flutter meta-application renders directly on DRM/KMS on a
 system with no EGL/GLES hardware acceleration.
 
 
-### M18 - Direct input
+### M18 - Direct input  ✅ libinput-ready source (adapter)
 
 Implement libinput integration.
 
 Acceptance: touch UI operates directly on DRM/KMS without Wayland.
 
-### M19 - DRM vsync
+### M19 - DRM vsync  ✅ page-flip timing
 
 Drive Flutter vsync from DRM page-flip timing.
 
 Acceptance: Flutter animations synchronize to physical display refresh.
 
-### M20 - Production graphics
+### M20 - Production graphics  ✅ swapchain + fences (primitives)
 
 Implement atomic KMS, explicit fences, robust DMA-BUF reuse, recovery paths,
 and hotplug where required.
