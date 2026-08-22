@@ -7,7 +7,7 @@ or a **DRM/KMS** framebuffer, without copying any of the reference embedders
 
 ```
 ┌─────────────────────────────────────────────┐
-│               openauto_shell                │
+│               flshell_app                │
 │                                             │
 │  ┌────────────┐       ┌─────────────────┐   │
 │  │ Flutter    │  EGL/ │   Wayland or    │   │
@@ -21,43 +21,43 @@ or a **DRM/KMS** framebuffer, without copying any of the reference embedders
 
 ## Layout
 
-The code is **header-only** and organised as namespace-based functional modules
-(no classes). Common (backend-agnostic) logic is split from concrete display
-backends, selected at build time via `OA_BACKEND`.
+The code is **header-only C++23** and follows the `shell-baseline` architecture:
+`namespace = component`, `struct = state/data`, `function = behavior`. No
+classes, no inheritance-based backend hierarchy.
 
-- `shell/src/core/` — shared logic, independent of the display backend:
-  - `oa_types.h`       — plain data structs (`frame_tick`, `input_event`, ...).
-  - `oa_backend.h`     — `backend` dispatch table (vtable of function pointers)
-    separating the engine from a specific backend.
-  - `oa_engine.h`      — `oa::engine` handle + free functions (Flutter engine).
-  - `oa_egl.h`, `oa_codec.h`, `oa_keyboard.h`, `oa_texture.h`,
-    `oa_task_runner.h` — helper namespaces.
-- `shell/src/backends/` — concrete display backends (`backend_api` impls):
-  - `wayland/oa_wayland.h` — `oa::backend::wayland::create_wayland()`.
-  - `kms/oa_kms.h`         — `oa::backend::kms::create_kms()`.
-- `shell/src/main.cpp`  — entry point; builds the selected backend + engine.
-- `shell/src/protocol/` — generated Wayland `xdg-shell` client bindings.
-- `flake.nix` — builds `flutter-engine`, `shell` (Wayland) and `shell-kms`.
+The framework lives under `shell/include/shell/` (umbrella `shell.hpp`):
+
+- `engine.hpp` / `engine_impl.hpp` — Flutter engine wrapper (init, vsync, input,
+  keyboard, external textures).
+- `backend/wayland.hpp` — working Wayland client backend (`create`, `connect`,
+  `setup_egl`, `setup_surface`, `run`).
+- `backend/drm.hpp` — DRM/KMS backend (baseline stub).
+- `egl.hpp`, `texture.hpp`, `keyboard.hpp`, `input.hpp`, `event.hpp`,
+  `vsync.hpp`, `error.hpp`, `result.hpp`, `log.hpp`, `handle.hpp`.
+- Scene model baseline stubs: `stage.hpp`, `layer.hpp`, `surface.hpp`,
+  `transition.hpp`, `shared.hpp` (clipboard/selection).
+- Plugin baseline: `plugin.hpp`, `plugin_abi.h`, `native.hpp`.
+- `protocol/` — generated Wayland `xdg-shell` bindings.
+
+Runnable app: `shell/src/main.cpp` (Wayland) with `--test-texture` demo
+producer. `flake.nix` builds it as `.#shell` (`flshell-app`).
 
 ## Backends
 
 | Backend | Display path | Frame pacing | Input |
 |---------|--------------|--------------|-------|
-| `wayland` | `xdg_surface` + `wl_egl_window` | 60 Hz timer → vsync | pointer / keyboard |
-| `kms`     | GBM buffer + DRM page-flip | vblank wait | evdev (todo) |
+| `wayland` | `xdg_surface` + `wl_egl_window` | frame callback / timer fallback | pointer / keyboard |
+| `drm`     | GBM buffer + DRM page-flip (baseline) | vblank wait | evdev (todo) |
 
-Both output through EGL/OpenGLES2, giving Flutter a standard `kOpenGL` renderer.
+Both converge on EGL/OpenGLES2, giving Flutter a standard `kOpenGL` renderer.
 
 ## Build & run
 
 ```sh
-# Wayland backend (default)
-nix build .#shell
-# DRM/KMS backend (build-time selection)
-nix build .#shell-kms
+nix build .#shell   # builds flshell-app (Wayland)
 
-# Run (the backend is fixed at build time; pass --assets/--icu/--test-texture)
-./result-shell/bin/openauto_shell \
+# Run
+./result-shell/bin/flshell_app \
   --assets=/path/to/flutter_project/build/flutter_assets \
   --icu=/path/to/flutter_project/build/icudtl.dat \
   --test-texture   # optional demo external-texture producer
@@ -77,8 +77,8 @@ The shell was verified end-to-end on a live Wayland compositor by building a
 small animated sample app and running it with:
 
 ```sh
-./result-shell/bin/openauto_shell --backend=wayland \
-  --assets=/path/to/app/build/flutter_assets --icu=.../icudtl.dat
+./result-shell/bin/flshell_app \
+  --assets=/path/to/app/build/flutter_assets --icu=.../icudtl.dat --test-texture
 ```
 
 The app rendered a continuously animating full-screen color/counter at a
@@ -150,5 +150,5 @@ id `1001` and pushes an animated gradient + moving bar at ~30 fps). The sample
 app shows it on the "ExtTexture" panel.
 
 ```sh
-./result-shell/bin/openauto_shell --assets=APP_ASSETS --icu=ICU --test-texture
+./result-shell/bin/flshell_app --assets=APP_ASSETS --icu=ICU --test-texture
 ```
