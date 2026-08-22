@@ -77,6 +77,8 @@ struct state
     bool running{};
     bool configured{};
     bool pointer_added{};
+    bool frame_ready{};   // compositor has shown a frame and awaits the next
+    bool presented_once{};
     std::uint32_t buttons{};
     double pointer_x{};
     double pointer_y{};
@@ -146,8 +148,11 @@ inline void k_repeat(void*, wl_keyboard*, std::int32_t, std::int32_t)
 inline void frame_done(void* d, wl_callback* cb, std::uint32_t)
 {
     wl_callback_destroy(cb);
-    if (auto* s = static_cast<state*>(d); s->cb.on_vsync)
-        s->cb.on_vsync();
+    auto* s = static_cast<state*>(d);
+    // The compositor has displayed the previous buffer; the FrameClife says we
+    // may submit the next one. Signal one vsync to the engine (consumed by run).
+    if (s->frame_cb == cb) s->frame_cb = nullptr;
+    s->frame_ready = true;
 }
 } // namespace detail
 
@@ -437,33 +442,40 @@ inline auto setup_surface(state& s) -> result<void>
     return {};
 }
 
+// Arm a Wayland frame callback on the surface. The compositor fires it once it
+// has displayed the presented buffer; that is the natural vsync for Flutter.
+inline auto arm_frame(state& s) -> void
+{
+    if (s.frame_cb) return;
+    s.frame_cb = wl_surface_frame(s.surface);
+    wl_callback_add_listener(s.frame_cb, &kFrame, &s);
+    wl_surface_commit(s.surface);
+}
+
 inline auto run(state& s) -> void
 {
     s.running = true;
-    constexpr auto kPeriod = std::chrono::milliseconds(16);
-    auto next_tick = std::chrono::steady_clock::now();
+    // Bootstrap: before any frame is presented no frame callback will arrive,
+    // so give the engine one initial vsync to start drawing.
+    if (s.cb.on_vsync) s.cb.on_vsync();
+
     while (s.running)
     {
-        auto now = std::chrono::steady_clock::now();
-        auto to = next_tick - now;
-        if (to < std::chrono::steady_clock::duration::zero())
-            to = {};
-        int to_ms = static_cast<int>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(to).count());
         pollfd pfd{};
         pfd.fd = wl_display_get_fd(s.display);
         pfd.events = POLLIN;
-        int rc = poll(&pfd, 1, to_ms);
+        int rc = poll(&pfd, 1, 20);
         if (rc > 0 && (pfd.revents & POLLIN))
         {
             wl_display_dispatch(s.display);
             wl_display_flush(s.display);
         }
-        if (now >= next_tick)
+        // Render only when the compositor has acknowledged the previous frame
+        // (frame callback fired). Consume the one-shot frame_ready flag.
+        if (s.frame_ready && s.cb.on_vsync)
         {
-            if (s.cb.on_vsync)
-                s.cb.on_vsync();
-            next_tick += kPeriod;
+            s.frame_ready = false;
+            s.cb.on_vsync();
         }
     }
 }
@@ -475,14 +487,21 @@ inline auto stop(state& s) -> void
 
 inline auto swap(state& s) -> bool
 {
+    bool ok = false;
 #ifdef SHELL_RENDERER_GL
-    return eglSwapBuffers(static_cast<EGLDisplay>(s.egl.display),
-                          static_cast<EGLSurface>(s.egl.surface)) == EGL_TRUE;
+    ok = eglSwapBuffers(static_cast<EGLDisplay>(s.egl.display),
+                        static_cast<EGLSurface>(s.egl.surface)) == EGL_TRUE;
 #else
-    // Software present already committed the wl_shm buffer.
-    (void)s;
-    return true;
+    ok = s.shm_buffer != nullptr;
 #endif
+    if (ok)
+    {
+        s.presented_once = true;
+        // Ask the compositor to report when this frame has been shown; that
+        // frame callback is the vsync that gates the engine's next render.
+        arm_frame(s);
+    }
+    return ok;
 }
 
 inline auto destroy(state& s) -> void
@@ -597,11 +616,20 @@ inline bool software_present(void* d, const renderer::software::buffer& frame)
     munmap(mapped, size);
     ::close(fd);
 
-    // Attach and present the buffer on the surface.
+    // Attach and present the software buffer on the surface.
     wl_surface_attach(s->surface, s->shm_buffer, 0, 0);
-    wl_surface_damage(s->surface, 0, 0, static_cast<std::int32_t>(frame.width),
+    wl_surface_damage(s->surface, 0, 0,
+                      static_cast<std::int32_t>(frame.width),
                       static_cast<std::int32_t>(frame.height));
     wl_surface_commit(s->surface);
+    // Arm a frame callback so the next render is gated on the compositor
+    // having displayed this software frame.
+    if (!s->frame_cb)
+    {
+        s->frame_cb = wl_surface_frame(s->surface);
+        wl_callback_add_listener(s->frame_cb, &kFrame, s);
+    }
+    s->presented_once = true;
     wl_display_flush(s->display);
     return true;
 }
