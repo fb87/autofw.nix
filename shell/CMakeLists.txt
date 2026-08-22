@@ -66,6 +66,7 @@ set(SOURCES
   src/oa_kms.cpp
   src/oa_task_runner.cpp
   src/oa_codec.cpp
+  src/oa_texture.cpp
   src/protocol/xdg-shell-protocol.c
 )
 

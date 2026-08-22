@@ -114,3 +114,24 @@ architecture-aware (`linux-x64` / `linux-arm64`).
   is fully wired for Wayland.
 - Semantics (accessibility) callbacks are acknowledged but not yet surfaced to
   an a11y stack.
+
+## External textures
+
+The shell supports Flutter **external textures**, letting native code (e.g. an
+Android Auto video sink or a GStreamer pipeline) composite its own GL frames
+into the scene inside a Dart `Texture(textureId: ...)` widget.
+
+`Engine` exposes:
+
+- `RegisterExternalTexture(int64 id)` /
+  `UnregisterExternalTexture(int64 id)`
+- `PushExternalTextureFrame(int64 id, w, h, rgba8)` — uploads a new RGBA8 frame
+  (on a dedicated GL context in the render sharegroup) and signals the engine.
+
+A demo producer is bundled behind the `--test-texture` flag (registers texture
+id `1001` and pushes an animated gradient + moving bar at ~30 fps). The sample
+app shows it on the "ExtTexture" panel.
+
+```sh
+./result-shell/bin/openauto_shell --assets=APP_ASSETS --icu=ICU --test-texture
+```

@@ -97,6 +97,12 @@ void LogMessage(const char* tag, const char* message, void* /*user_data*/) {
   std::fflush(stdout);
 }
 
+bool OnGlExternalTextureFrame(void* user_data, int64_t texture_id, size_t w,
+                              size_t h, FlutterOpenGLTexture* texture_out) {
+  return static_cast<Engine*>(user_data)->GetExternalTexture(
+      texture_id, w, h, texture_out);
+}
+
 }  // namespace
 }  // namespace oa
 
@@ -134,6 +140,14 @@ bool Engine::Init(Backend* backend, const std::string& assets_path,
                  "[oa-engine] failed to create resource GLES2 context\n");
     return false;
   }
+  // A dedicated context in the same sharegroup so external-texture producers
+  // can upload frames without contending with Flutter's resource thread.
+  texture_upload_context_ = egl::CreateContext(dpy, config, gl_context_);
+  if (texture_upload_context_ == EGL_NO_CONTEXT) {
+    std::fprintf(stderr,
+                 "[oa-engine] failed to create texture-upload GLES2 context\n");
+    return false;
+  }
 
   // 2) OpenGL renderer configuration.
   FlutterOpenGLRendererConfig gl_config = {};
@@ -144,6 +158,7 @@ bool Engine::Init(Backend* backend, const std::string& assets_path,
   gl_config.fbo_callback = OnFbo;
   gl_config.make_resource_current = MakeResourceCurrent;
   gl_config.gl_proc_resolver = GlProcResolver;
+  gl_config.gl_external_texture_frame_callback = OnGlExternalTextureFrame;
 
   // 3) Project arguments.
   char* assets = strdup(assets_path.c_str());
@@ -239,6 +254,100 @@ void Engine::SendMetrics() {
 
   // Nudge the engine to schedule its first frame.
   FlutterEngineScheduleFrame(engine_);
+}
+
+// --- External texture support ------------------------------------------------
+bool Engine::RegisterExternalTexture(int64_t texture_id) {
+  textures_.Register(texture_id);
+  FlutterEngineResult rc =
+      FlutterEngineRegisterExternalTexture(engine_, texture_id);
+  if (rc != kSuccess) {
+    std::fprintf(stderr, "[oa-engine] register ext texture %lld rc=%d\n",
+                 (long long)texture_id, rc);
+    textures_.Unregister(texture_id);
+    return false;
+  }
+  std::fprintf(stderr, "[oa-engine] registered external texture %lld\n",
+               (long long)texture_id);
+  return true;
+}
+
+bool Engine::UnregisterExternalTexture(int64_t texture_id) {
+  FlutterEngineResult rc =
+      FlutterEngineUnregisterExternalTexture(engine_, texture_id);
+  // Free the GL object under a current context before removing the entry.
+  if (MakeResourceCurrent(this)) {
+    textures_.ReleaseTexture(texture_id);
+    OnClearCurrent(this);
+  }
+  textures_.Unregister(texture_id);
+  std::fprintf(stderr, "[oa-engine] unregistered external texture %lld rc=%d\n",
+               (long long)texture_id, rc);
+  return rc == kSuccess;
+}
+
+bool Engine::IsExternalTextureRegistered(int64_t texture_id) {
+  return textures_.Has(texture_id);
+}
+
+bool Engine::PushExternalTextureFrame(int64_t texture_id, uint32_t width,
+                                      uint32_t height, const uint8_t* rgba) {
+  if (!textures_.Has(texture_id)) {
+    std::fprintf(stderr,
+                 "[oa-engine] push frame: texture %lld not registered\n",
+                 (long long)texture_id);
+    return false;
+  }
+  // Upload on a dedicated context (shares the render sharegroup) so we never
+  // fight Flutter's own resource thread for the resource context.
+  EGLDisplay dpy = reinterpret_cast<EGLDisplay>(backend_->egl_display());
+  eglBindAPI(EGL_OPENGL_ES_API);
+  bool ok = eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                           texture_upload_context_) == EGL_TRUE;
+  if (ok) {
+    ok = textures_.UploadFrame(texture_id, width, height, rgba);
+    eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+  } else {
+    std::fprintf(stderr,
+                 "[oa-engine] push frame: cannot make upload ctx current "
+                 "(egl=0x%x)\n",
+                 eglGetError());
+  }
+  if (!ok) return false;
+
+  // Tell the engine a new frame is available; it re-composites next vsync.
+  FlutterEngineResult rc = FlutterEngineMarkExternalTextureFrameAvailable(
+      engine_, texture_id);
+  if (rc != kSuccess) {
+    std::fprintf(stderr, "[oa-engine] mark ext texture %lld frame rc=%d\n",
+                 (long long)texture_id, rc);
+    return false;
+  }
+  return true;
+}
+
+bool Engine::GetExternalTexture(int64_t texture_id, size_t /*w*/, size_t /*h*/,
+                                FlutterOpenGLTexture* out) {
+  uint32_t name = 0, target = 0, format = 0, width = 0, height = 0;
+  bool ready = false;
+  if (!out) return false;
+  // The engine calls this with the render context current; allocate a
+  // placeholder texture if the producer hasn't pushed a frame yet so the
+  // engine always has a valid, sampleable object.
+  if (!textures_.GetTexture(texture_id, &name, &target, &format, &width,
+                            &height, &ready)) {
+    textures_.EnsureTexture(texture_id, 1, 1);
+    textures_.GetTexture(texture_id, &name, &target, &format, &width, &height,
+                         &ready);
+  }
+  out->target = target;
+  out->name = name;
+  out->format = format;
+  out->width = width;
+  out->height = height;
+  out->user_data = nullptr;
+  out->destruction_callback = nullptr;
+  return true;
 }
 
 void Engine::OnVsync(const FrameTick& tick) {

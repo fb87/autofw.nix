@@ -13,6 +13,7 @@
 #include "flutter_embedder.h"
 #include "oa_backend.h"
 #include "oa_task_runner.h"
+#include "oa_texture.h"
 
 #include <memory>
 #include <mutex>
@@ -40,6 +41,24 @@ class Engine {
   // Flutter framework on the platform thread.
   void SendInputEvent(const InputEvent& event);
 
+  // --- External texture support --------------------------------------------
+  // Register/unregister a texture with Flutter. The framework references it
+  // from Dart via a `Texture(textureId: ...)` widget.
+  bool RegisterExternalTexture(int64_t texture_id);
+  bool UnregisterExternalTexture(int64_t texture_id);
+  bool IsExternalTextureRegistered(int64_t texture_id);
+
+  // Push a new RGBA8 frame into an external texture and mark it available so
+  // the engine re-composites on the next vsync. May be called from any thread;
+  // performs the GL upload on the resource context (shared with the render
+  // context). |texture_id| must already be registered.
+  bool PushExternalTextureFrame(int64_t texture_id, uint32_t width,
+                                uint32_t height, const uint8_t* rgba);
+
+  // internal: serve the engine's gl_external_texture_frame_callback.
+  bool GetExternalTexture(int64_t texture_id, size_t /*w*/, size_t /*h*/,
+                          FlutterOpenGLTexture* out);
+
   // --- accessors used by the C callback trampolines -------------------------
   EGLContext gl_context() const { return gl_context_; }
   EGLContext resource_context() const { return resource_context_; }
@@ -65,6 +84,10 @@ class Engine {
   // asynchronous texture uploads on a background thread. Each Flutter thread
   // must bind *its own* context to avoid EGL_BAD_ATTRIBUTE conflicts.
   EGLContext resource_context_ = EGL_NO_CONTEXT;
+  // A third context in the same sharegroup used by external-texture producers
+  // (e.g. video sinks) so they never fight with Flutter's own resource thread
+  // over |resource_context_|.
+  EGLContext texture_upload_context_ = EGL_NO_CONTEXT;
 
   // A dedicated platform task runner so Flutter can deliver platform-message
   // callbacks while our platform thread is busy in the display event loop.
@@ -73,6 +96,8 @@ class Engine {
   std::mutex vsync_mutex_;
   std::queue<intptr_t> vsync_batons_;
   uint32_t last_buttons_ = 0;  // cached pointer button mask for phase synthesis
+
+  TextureRegistry textures_;  // registered external textures
 };
 
 }  // namespace oa
