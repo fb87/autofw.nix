@@ -28,6 +28,8 @@ or a **DRM/KMS** framebuffer, without copying any of the reference embedders
   - `src/oa_egl.h/.cpp`      — shared EGL helper (config/context).
   - `src/oa_wayland.h/.cpp`  — Wayland backend (xdg-shell, wl_egl_window).
   - `src/oa_kms.h/.cpp`      — DRM/KMS backend (GBM + page-flip).
+  - `src/oa_task_runner.h/.cpp` — platform task runner (vsync + messages).
+  - `src/oa_codec.h/.cpp`    — minimal StandardMessageCodec for platform channels.
   - `src/protocol/`          — generated Wayland `xdg-shell` client bindings.
 - `flake.nix` — Nix flake: builds the `flutter-engine` and `openauto-shell`
   packages, plus a development shell.
@@ -36,7 +38,7 @@ or a **DRM/KMS** framebuffer, without copying any of the reference embedders
 
 | Backend | Display path | Frame pacing | Input |
 |---------|--------------|--------------|-------|
-| `wayland` | `xdg_surface` + `wl_egl_window` | frame callback | pointer / keyboard |
+| `wayland` | `xdg_surface` + `wl_egl_window` | 60 Hz timer → `OnVsync` | pointer / keyboard |
 | `kms`     | GBM buffer + DRM page-flip | vblank wait | evdev (todo) |
 
 Both output through EGL/OpenGLES2, giving Flutter a standard `kOpenGL` renderer.
@@ -66,6 +68,37 @@ nix develop .#
 `kernel_blob.bin`, `icudtl.dat`, and the app's `AssetManifest`/`FontManifest`.
 Produce one with `flutter build bundle` (or `flutter assemble` for the
 `kernel_blob.bin`).
+
+## Verification
+
+The shell was verified end-to-end on a live Wayland compositor by building a
+small animated sample app and running it with:
+
+```sh
+./result-shell/bin/openauto_shell --backend=wayland \
+  --assets=/path/to/app/build/flutter_assets --icu=.../icudtl.dat
+```
+
+The app rendered a continuously animating full-screen color/counter at a
+sustained ~45 fps, proving the full pipeline:
+
+* Flutter `FlutterEngineRun` on the OpenGL renderer config
+* vsync ticks (60 Hz timer) → `FlutterEngineOnVsync`
+* per-frame `present` → `eglSwapBuffers` → `wl_surface_commit`
+
+Observed shell logs:
+
+```
+[oa-engine] vsync request #1
+[oa-engine] present #1
+[oa-wayland] presented 89 frames total, 44.3 fps over 2007ms
+```
+
+The archived `flutter-team-archive/gallery` sample builds with a few patches
+(imports `package:gallery/gen_l10n/...`, dependency overrides, and a `main()`
+that does not block on `get_storage`), but it requires deferred-component
+loading via the engine's platform channel/shelving APIs that a bare embedder
+does not yet implement, so it is not the recommended first smoke test.
 
 ## Engine package
 

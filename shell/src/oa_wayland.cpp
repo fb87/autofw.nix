@@ -12,6 +12,8 @@
 #include <sys/errno.h>
 #include <unistd.h>
 
+#include <chrono>
+#include <thread>
 #include <cstdio>
 #include <cstring>
 
@@ -44,9 +46,12 @@ void OnWmBasePing(void* /*data*/, xdg_wm_base* wm, uint32_t serial) {
 const xdg_wm_base_listener g_wmbase_listener = {.ping = OnWmBasePing};
 
 // xdg_surface.
-void OnXdgSurfaceConfigure(void* /*data*/, xdg_surface* surface,
+void OnXdgSurfaceConfigure(void* data, xdg_surface* surface,
                            uint32_t serial) {
   xdg_surface_ack_configure(surface, serial);
+  if (auto* b = static_cast<WaylandBackend*>(data)) {
+    b->OnXdgConfigureAcked();
+  }
 }
 const xdg_surface_listener g_xdgsurface_listener = {
     .configure = OnXdgSurfaceConfigure};
@@ -75,28 +80,47 @@ void OnPointerButton(void* data, wl_pointer* p, uint32_t serial, uint32_t time,
                      uint32_t button, uint32_t state);
 void OnPointerAxis(void* d, wl_pointer* p, uint32_t t, uint32_t axis,
                    wl_fixed_t value);
+void OnPointerEnter(void* data, wl_pointer* p, uint32_t serial, wl_surface* s,
+                    wl_fixed_t sx, wl_fixed_t sy);
+void OnPointerLeave(void* data, wl_pointer* p, uint32_t serial,
+                    wl_surface* s);
+void OnPointerAxisSource(void* data, wl_pointer* p, uint32_t source);
+void OnPointerAxisStop(void* data, wl_pointer* p, uint32_t time, uint32_t axis);
+void OnPointerAxisDiscrete(void* data, wl_pointer* p, uint32_t axis,
+                           int32_t discrete);
+void OnPointerFrame(void* data, wl_pointer* p);
 const wl_pointer_listener g_pointer_listener = {
-    .enter = nullptr,
-    .leave = nullptr,
+    .enter = OnPointerEnter,
+    .leave = OnPointerLeave,
     .motion = OnPointerMotion,
     .button = OnPointerButton,
     .axis = OnPointerAxis,
-    .frame = nullptr,
-    .axis_source = nullptr,
-    .axis_stop = nullptr,
-    .axis_discrete = nullptr,
+    .frame = OnPointerFrame,
+    .axis_source = OnPointerAxisSource,
+    .axis_stop = OnPointerAxisStop,
+    .axis_discrete = OnPointerAxisDiscrete,
 };
 
 // Keyboard.
 void OnKeyboardKey(void* data, wl_keyboard* k, uint32_t serial, uint32_t time,
                    uint32_t key, uint32_t state);
+void OnKeyboardKeymap(void* data, wl_keyboard* k, uint32_t format, int32_t fd,
+                      uint32_t size);
+void OnKeyboardEnter(void* data, wl_keyboard* k, uint32_t serial,
+                     wl_surface* s, wl_array* keys);
+void OnKeyboardLeave(void* data, wl_keyboard* k, uint32_t serial,
+                     wl_surface* s);
+void OnKeyboardModifiers(void* data, wl_keyboard* k, uint32_t serial,
+                         uint32_t md, uint32_t ml, uint32_t mlk,
+                         uint32_t group);
+void OnKeyboardRepeat(void* data, wl_keyboard* k, int32_t rate, int32_t delay);
 const wl_keyboard_listener g_keyboard_listener = {
-    .keymap = nullptr,
-    .enter = nullptr,
-    .leave = nullptr,
+    .keymap = OnKeyboardKeymap,
+    .enter = OnKeyboardEnter,
+    .leave = OnKeyboardLeave,
     .key = OnKeyboardKey,
-    .modifiers = nullptr,
-    .repeat_info = nullptr,
+    .modifiers = OnKeyboardModifiers,
+    .repeat_info = OnKeyboardRepeat,
 };
 
 // Frame callback.
@@ -142,11 +166,29 @@ void OnPointerAxis(void* data, wl_pointer*, uint32_t, uint32_t axis,
                    wl_fixed_t value) {
   static_cast<WaylandBackend*>(data)->OnAxis(axis, wl_fixed_to_double(value));
 }
+void OnPointerEnter(void* data, wl_pointer*, uint32_t, wl_surface*,
+                    wl_fixed_t sx, wl_fixed_t sy) {
+  static_cast<WaylandBackend*>(data)->OnPointerMotion(wl_fixed_to_double(sx),
+                                                      wl_fixed_to_double(sy));
+}
+void OnPointerLeave(void*, wl_pointer*, uint32_t, wl_surface*) {}
+void OnPointerAxisSource(void*, wl_pointer*, uint32_t) {}
+void OnPointerAxisStop(void*, wl_pointer*, uint32_t, uint32_t) {}
+void OnPointerAxisDiscrete(void*, wl_pointer*, uint32_t, int32_t) {}
+void OnPointerFrame(void*, wl_pointer*) {}
 void OnKeyboardKey(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t key,
                    uint32_t state) {
   static_cast<WaylandBackend*>(data)->OnKey(
       key, state == WL_KEYBOARD_KEY_STATE_PRESSED);
 }
+void OnKeyboardKeymap(void*, wl_keyboard*, uint32_t, int32_t, uint32_t) {
+  // Keymap fd: a production shell would mmap and translate to logical keys.
+}
+void OnKeyboardEnter(void*, wl_keyboard*, uint32_t, wl_surface*, wl_array*) {}
+void OnKeyboardLeave(void*, wl_keyboard*, uint32_t, wl_surface*) {}
+void OnKeyboardModifiers(void*, wl_keyboard*, uint32_t, uint32_t, uint32_t,
+                         uint32_t, uint32_t) {}
+void OnKeyboardRepeat(void*, wl_keyboard*, int32_t, int32_t) {}
 void OnFrameDone(void* data, wl_callback* callback, uint32_t) {
   wl_callback_destroy(callback);
   static_cast<WaylandBackend*>(data)->OnFrameDone();
@@ -214,7 +256,10 @@ bool WaylandBackend::CreateSurface() {
   xdg_toplevel_set_title(top, "OpenAuto");
   xdg_toplevel_set_min_size(top, 1, 1);
 
-  // wait for the first configure event.
+  // The compositor only sends the initial xdg configure after the first commit;
+  // commit a buffer-less frame, then process the configure (and ack it), then
+  // wait for the surface to be marked configured before presenting.
+  wl_surface_commit(surface_);
   wl_display_roundtrip(display_);
 
   // Establish our window/EGL surface.
@@ -228,7 +273,8 @@ bool WaylandBackend::CreateSurface() {
       reinterpret_cast<EGLConfig>(egl_config_),
       reinterpret_cast<EGLNativeWindowType>(window_), nullptr);
   if (egl_surface_ == EGL_NO_SURFACE) {
-    std::fprintf(stderr, "[oa-wayland] eglCreateWindowSurface failed\n");
+    std::fprintf(stderr, "[oa-wayland] eglCreateWindowSurface failed egl=0x%x\n",
+                 eglGetError());
     return false;
   }
   return true;
@@ -257,21 +303,48 @@ void WaylandBackend::RunLoop(std::function<void(const FrameTick&)> on_vsync,
   on_input_ = std::move(on_input);
   running_ = true;
 
-  // Request the first frame.
-  CommitSurface();
+  // Drive rendering with a ~60Hz frame clock while also servicing Wayland
+  // socket events. The engine's OnVsync consumes a vblank request only when
+  // one is pending (it requests one per completed frame), so over-provisioning
+  // ticks is harmless and this avoids the bootstrap deadlock where the first
+  // compositor frame callback can never fire because no buffer is presented.
+  constexpr auto kFramePeriod = std::chrono::milliseconds(16);
+  auto next_tick = std::chrono::steady_clock::now();
 
   while (running_) {
-    if (wl_display_dispatch(display_) < 0) {
-      if (errno != EAGAIN) {
-        std::fprintf(stderr, "[oa-wayland] dispatch error: %s\n",
-                     strerror(errno));
-        break;
-      }
+    auto now = std::chrono::steady_clock::now();
+    auto to_tick = next_tick - now;
+    if (to_tick < std::chrono::steady_clock::duration::zero())
+      to_tick = std::chrono::steady_clock::duration::zero();
+    int timeout_ms =
+        (int)std::chrono::duration_cast<std::chrono::milliseconds>(to_tick)
+            .count();
+
+    // Wait for Wayland events (with a cap so the frame clock stays on pace).
+    struct pollfd pfd = {};
+    pfd.fd = wl_display_get_fd(display_);
+    pfd.events = POLLIN;
+    int rc = poll(&pfd, 1, timeout_ms);
+    if (rc > 0 && (pfd.revents & POLLIN)) {
+      // Dispatch all pending and newly-read events for our proxy objects.
+      wl_display_dispatch(display_);
+      wl_display_flush(display_);
     }
-    // Drive frame output when the engine wants to render (a frame callback
-    // will be received via FlushFramebuffer -> wl_surface_commit).
-    if (on_vsync_ && !frame_visible_) {
-      // Engine only asks to render while we accept a frame.
+
+    // Every frame period, hand the engine a tick (no-op if it isn't waiting).
+    // Do not tick ahead of the first xdg configure to avoid attaching a buffer
+    // to an unconfigured surface.
+    if (on_vsync_ && configured() && now >= next_tick) {
+      FrameTick tick;
+      tick.present_ns = 0;
+      tick.target_ns = 0;
+      on_vsync_(tick);
+      next_tick += kFramePeriod;
+    }
+
+    // Before the surface is configured, avoid busy-waiting.
+    if (!configured() && (now < next_tick)) {
+      std::this_thread::sleep_for(kFramePeriod);
     }
   }
   running_ = false;
@@ -294,24 +367,32 @@ bool WaylandBackend::FlushFramebuffer() {
       EGL_TRUE) {
     return false;
   }
+  frames_presented_++;
+  uint64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch())
+                        .count();
+  if (last_fps_log_ms_ == 0) last_fps_log_ms_ = now_ms;
+  uint64_t elapsed = now_ms - last_fps_log_ms_;
+  if (elapsed >= 2000) {
+    uint64_t frames_this_period = frames_presented_ - last_fps_log_frames_;
+    double fps = frames_this_period * 1000.0 / double(elapsed);
+    std::fprintf(stderr,
+                 "[oa-wayland] presented %llu frames total, %.1f fps over %llums\n",
+                 (unsigned long long)frames_presented_, fps,
+                 (unsigned long long)elapsed);
+    last_fps_log_ms_ = now_ms;
+    last_fps_log_frames_ = frames_presented_;
+  }
   // Arm the frame callback for the next present; this is what paces vsync.
   CommitSurface();
   return true;
 }
 
 void WaylandBackend::OnFrameDone() {
-  // The previous buffer has been shown; the compositor is ready for the next.
-  if (!running_) return;
+  // Frame pacing is driven by the render loop's own clock in RunLoop; the
+  // wl frame callback is used only to let the compositor know we saw the
+  // previous buffer, so there is nothing to do here.
   frame_visible_ = true;
-  if (on_vsync_) {
-    FrameTick tick;
-    // Compute a 60Hz target from the monotonic clock; the compositor drives
-    // the actual cadence. A more precise implementation would track the
-    // presentation time from the callback serial.
-    tick.present_ns = 0;
-    tick.target_ns = 0;
-    on_vsync_(tick);
-  }
 }
 
 bool WaylandBackend::WaitForVBlank(FrameTick* tick) {
@@ -418,6 +499,8 @@ void WaylandBackend::OnConfigure(uint32_t w, uint32_t h) {
   width_ = (w ? w : width_);
   height_ = (h ? h : height_);
 }
+
+void WaylandBackend::OnXdgConfigureAcked() { configured_ = true; }
 
 // --- Backend factory -----------------------------------------------------------
 Backend* CreateWaylandBackend() { return new WaylandBackend(); }

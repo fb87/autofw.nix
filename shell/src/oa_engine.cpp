@@ -3,6 +3,7 @@
 // Copyright 2026 OpenAuto Framework.
 #include "oa_engine.h"
 
+#include "oa_codec.h"
 #include "oa_egl.h"
 
 #include <GLES2/gl2.h>
@@ -10,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <sys/stat.h>
 
 // ---------------------------------------------------------------------------
 // C callback trampolines. Flutter invokes these on its render thread; the
@@ -23,12 +25,25 @@ bool OnMakeCurrent(void* user_data) {
   EGLDisplay dpy = reinterpret_cast<EGLDisplay>(e->backend()->egl_display());
   EGLSurface surf = reinterpret_cast<EGLSurface>(e->backend()->egl_surface());
   EGLContext ctx = e->gl_context();
-  return eglMakeCurrent(dpy, surf, surf, ctx) == EGL_TRUE;
+  if (surf == EGL_NO_SURFACE || dpy == EGL_NO_DISPLAY)
+    return false;
+  // eglBindAPI is thread-local; the render thread may default to OpenGL, so
+  // re-bind the ES client API before making the ES2 context current.
+  eglBindAPI(EGL_OPENGL_ES_API);
+  EGLBoolean ok = eglMakeCurrent(dpy, surf, surf, ctx);
+  if (ok != EGL_TRUE) {
+    std::fprintf(stderr, "[oa-engine] make_current failed egl=0x%x ctx=%p surf=%p\n",
+                 eglGetError(), (void*)ctx, (void*)surf);
+  }
+  return ok == EGL_TRUE;
 }
 
 bool OnClearCurrent(void* user_data) {
   auto* e = static_cast<Engine*>(user_data);
   EGLDisplay dpy = reinterpret_cast<EGLDisplay>(e->backend()->egl_display());
+  // Release whichever context is current on this thread; EGL must not have a
+  // context bound on more than one thread at a time.
+  EGLContext cur = eglGetCurrentContext();
   return eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) ==
          EGL_TRUE;
 }
@@ -45,19 +60,29 @@ uint32_t OnFbo(void* user_data) {
   return 0;
 }
 
-bool MakeResourceCurrent(void* user_data) { return OnMakeCurrent(user_data); }
+bool MakeResourceCurrent(void* user_data) {
+  // Flutter uploads textures from a worker thread. Because EGL contexts can
+  // only be current on one thread at a time, we bind a separate resource
+  // context that shares GL state with the main rendering context. A surfaceless
+  // bind is sufficient for texture uploads.
+  auto* e = static_cast<Engine*>(user_data);
+  EGLDisplay dpy = reinterpret_cast<EGLDisplay>(e->backend()->egl_display());
+  eglBindAPI(EGL_OPENGL_ES_API);
+  return eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
+                        e->resource_context()) == EGL_TRUE;
+}
 
 void* GlProcResolver(void* /*user_data*/, const char* name) {
+  // Ensure the ES client API is current on this thread so eglGetProcAddress
+  // resolves GLES2 symbols rather than desktop GL.
+  eglBindAPI(EGL_OPENGL_ES_API);
   return reinterpret_cast<void*>(eglGetProcAddress(name));
 }
 
 void OnVsyncRequest(void* user_data, intptr_t baton) {
-  // The engine asks for the next frame time; queue the baton and the render
-  // loop will answer it on the next vblank via Engine::OnVsync.
   auto* e = static_cast<Engine*>(user_data);
   e->QueueVsyncBaton(baton);
 }
-
 void OnPlatformMessage(const FlutterPlatformMessage* message, void* user_data) {
   static_cast<Engine*>(user_data)->HandlePlatformMessage(message);
 }
@@ -79,6 +104,7 @@ void LogMessage(const char* tag, const char* message, void* /*user_data*/) {
 namespace oa {
 
 Engine::~Engine() {
+  if (platform_task_runner_) platform_task_runner_->RequestStop();
   if (engine_) {
     FlutterEngineShutdown(engine_);
     engine_ = nullptr;
@@ -97,6 +123,14 @@ bool Engine::Init(Backend* backend, const std::string& assets_path,
     std::fprintf(stderr, "[oa-engine] failed to create GLES2 context\n");
     return false;
   }
+  // A second context sharing resources is used by make_resource_current so
+  // texture uploads can run on a dedicated worker thread.
+  resource_context_ = egl::CreateContext(dpy, config, gl_context_);
+  if (resource_context_ == EGL_NO_CONTEXT) {
+    std::fprintf(stderr,
+                 "[oa-engine] failed to create resource GLES2 context\n");
+    return false;
+  }
 
   // 2) OpenGL renderer configuration.
   FlutterOpenGLRendererConfig gl_config = {};
@@ -112,6 +146,19 @@ bool Engine::Init(Backend* backend, const std::string& assets_path,
   char* assets = strdup(assets_path.c_str());
   char* icu = strdup(icu_path.c_str());
 
+  // A dedicated platform task runner lets Flutter deliver platform messages
+  // (and other platform-thread work) on its own thread while our platform
+  // thread is busy in the display backend event loop. We use the
+  // Initialize -> set-engine -> RunInitialized sequence so tasks posted during
+  // startup can be serviced once the engine handle exists.
+  platform_task_runner_ = std::make_unique<TaskRunner>();
+  platform_task_runner_->Start();
+  FlutterTaskRunnerDescription platform_runner =
+      platform_task_runner_->description();
+  FlutterCustomTaskRunners custom_runners = {};
+  custom_runners.struct_size = sizeof(custom_runners);
+  custom_runners.platform_task_runner = &platform_runner;
+
   FlutterProjectArgs args = {};
   args.struct_size = sizeof(args);
   args.assets_path = assets;
@@ -120,6 +167,7 @@ bool Engine::Init(Backend* backend, const std::string& assets_path,
   args.update_semantics_callback = OnSemantics;
   args.vsync_callback = OnVsyncRequest;
   args.log_message_callback = LogMessage;
+  args.custom_task_runners = &custom_runners;
 
   FlutterRendererConfig renderer = {};
   renderer.type = kOpenGL;
@@ -127,15 +175,26 @@ bool Engine::Init(Backend* backend, const std::string& assets_path,
 
   FlutterEngine engine = nullptr;
   FlutterEngineResult rc =
-      FlutterEngineRun(FLUTTER_ENGINE_VERSION, &renderer, &args, this, &engine);
+      FlutterEngineInitialize(FLUTTER_ENGINE_VERSION, &renderer, &args, this,
+                              &engine);
   std::free(assets);
   std::free(icu);
 
   if (rc != kSuccess) {
-    std::fprintf(stderr, "[oa-engine] FlutterEngineRun failed rc=%d\n", rc);
+    std::fprintf(stderr, "[oa-engine] FlutterEngineInitialize failed rc=%d\n",
+                 rc);
+    platform_task_runner_->RequestStop();
     return false;
   }
   engine_ = engine;
+  platform_task_runner_->set_engine(engine_);
+
+  rc = FlutterEngineRunInitialized(engine_);
+  if (rc != kSuccess) {
+    std::fprintf(stderr, "[oa-engine] FlutterEngineRunInitialized failed rc=%d\n",
+                 rc);
+    return false;
+  }
 
   SendMetrics();
   return true;
@@ -152,6 +211,19 @@ std::unique_ptr<Engine> Engine::Create(Backend* backend,
 }
 
 void Engine::SendMetrics() {
+  // Register the output display with the engine; newer Flutter needs this
+  // before it will schedule frames.
+  FlutterEngineDisplay display = {};
+  display.struct_size = sizeof(display);
+  display.single_display = true;
+  display.refresh_rate = 60.0;
+  display.width = backend_->width();
+  display.height = backend_->height();
+  display.device_pixel_ratio = backend_->dpi();
+  FlutterEngineNotifyDisplayUpdate(engine_,
+                                   kFlutterEngineDisplaysUpdateTypeStartup,
+                                   &display, 1);
+
   // The implicit (single) view targets the whole display.
   FlutterWindowMetricsEvent metrics = {};
   metrics.struct_size = sizeof(metrics);
@@ -159,28 +231,72 @@ void Engine::SendMetrics() {
   metrics.height = static_cast<size_t>(backend_->height());
   metrics.pixel_ratio = backend_->dpi();
   metrics.view_id = 0;
+  metrics.display_id = 0;
   FlutterEngineSendWindowMetricsEvent(engine_, &metrics);
+
+  // Nudge the engine to schedule its first frame.
+  FlutterEngineScheduleFrame(engine_);
 }
 
 void Engine::OnVsync(const FrameTick& tick) {
-  std::lock_guard<std::mutex> lock(vsync_mutex_);
-  if (vsync_batons_.empty()) {
-    return;
+  intptr_t baton = 0;
+  {
+    std::lock_guard<std::mutex> lock(vsync_mutex_);
+    if (vsync_batons_.empty()) {
+      return;
+    }
+    baton = vsync_batons_.front();
+    vsync_batons_.pop();
   }
-  intptr_t baton = vsync_batons_.front();
-  vsync_batons_.pop();
-  FlutterEngineOnVsync(engine_, baton, tick.present_ns, tick.target_ns);
+  uint64_t present_ns = tick.present_ns;
+  uint64_t target_ns = tick.target_ns;
+  // The engine requires monotonic-nanosecond timestamps; if the backend did
+  // not fill them, derive them from the engine clock.
+  if (present_ns == 0) present_ns = FlutterEngineGetCurrentTime();
+  if (target_ns == 0) target_ns = present_ns + 16666667ull;  // ~60Hz
+  FlutterEngineOnVsync(engine_, baton, present_ns, target_ns);
 }
 
 void Engine::HandlePlatformMessage(const FlutterPlatformMessage* message) {
-  // Acknowledge every platform message by responding with an empty payload so
-  // the framework does not wait forever on an embedder that has nothing to say
+  // The Dart `path_provider` plugin (used by e.g. get_storage) asks for a
+  // writable directory to store application data. We satisfy it with a stable
+  // directory under the embedder's data root so DeferredLibrary / in-Isolate
+  // storage works on a bare embedder.
+  if (std::strcmp(message->channel,
+                  "plugins.flutter.io/path_provider") == 0) {
+    HandlePathProviderMessage(message);
+    return;
+  }
+
+  // Acknowledge every other platform message with an empty payload so the
+  // framework does not wait forever on an embedder that has nothing to say
   // (e.g. the EngineRunInfo handshake at start-up).
   FlutterEngineResult rc = FlutterEngineSendPlatformMessageResponse(
       engine_, message->response_handle, nullptr, 0);
+  (void)rc;
+}
+
+void Engine::HandlePathProviderMessage(const FlutterPlatformMessage* message) {
+  // The path_provider channel uses the binary StandardMethodCodec; decode the
+  // method name and reply with a StandardMessageCodec { 'path': ... } map.
+  std::string method =
+      oa::DecodeStandardMethodCall(message->message, message->message_size);
+
+  std::string dir;
+  if (const char* home = std::getenv("HOME")) {
+    dir = std::string(home) + "/.openauto-data";
+  } else {
+    dir = "/tmp/openauto-data";
+  }
+  // Ensure it exists so get_storage can write files into it.
+  mkdir(dir.c_str(), 0700);
+
+  std::vector<uint8_t> response = oa::EncodeStandardStringMap("path", dir);
+  FlutterEngineResult rc = FlutterEngineSendPlatformMessageResponse(
+      engine_, message->response_handle, response.data(), response.size());
   std::fprintf(stderr,
-               "[oa-engine] platform message '%s' (%zu bytes), ack rc=%d\n",
-               message->channel, message->message_size, rc);
+               "[oa-engine] path_provider method '%s' => '%s' (%zu bytes, rc=%d)\n",
+               method.c_str(), dir.c_str(), response.size(), rc);
 }
 
 void Engine::SendInputEvent(const InputEvent& event) {

@@ -19,8 +19,11 @@ namespace oa::egl {
 bool ChooseConfig(EGLDisplay display, EGLConfig* config_out);
 
 // Create an OpenGLES2 context bound to |config|. Returns EGL_NO_CONTEXT on
-// failure. The context is obtained on the calling thread.
-EGLContext CreateContext(EGLDisplay display, EGLConfig config);
+// failure. If |share_with| is non-NULL the new context shares GL resources
+// (textures, programs) with that context, matching Flutter's expectation that
+// the render and texture-upload contexts share a resource group.
+EGLContext CreateContext(EGLDisplay display, EGLConfig config,
+                         EGLContext share_with = EGL_NO_CONTEXT);
 
 // Query whether |display| supports the named EGL extension string.
 bool HasExtension(EGLDisplay display, const char* name);

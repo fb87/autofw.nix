@@ -1,2 +1,4 @@
 result
 result-shell
+# Test-only Flutter sample app used to verify the shell (cloned separately).
+/sample-gallery

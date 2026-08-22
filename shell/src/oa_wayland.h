@@ -55,7 +55,12 @@ class WaylandBackend final : public Backend {
   void OnAxis(uint32_t axis, double value);
   void OnKey(uint32_t keycode, bool down);
   void OnConfigure(uint32_t w, uint32_t h);
+  void OnXdgConfigureAcked();
   void OnFrameDone();
+
+  // True once the compositor has sent+acked the first xdg configure, i.e. the
+  // surface may carry a buffer.
+  bool configured() const { return configured_; }
 
  private:
   bool CreateSurface();
@@ -89,6 +94,12 @@ class WaylandBackend final : public Backend {
 
   bool running_ = false;
   bool frame_visible_ = false;
+  bool configured_ = false;  // xdg configure received and acked
+
+  // Frame counters for lightweight present-rate diagnostics.
+  uint64_t frames_presented_ = 0;
+  uint64_t last_fps_log_ms_ = 0;
+  uint64_t last_fps_log_frames_ = 0;
 
   std::function<void(const InputEvent&)> on_input_;
   std::function<void(const FrameTick&)> on_vsync_;
