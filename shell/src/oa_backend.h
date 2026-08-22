@@ -41,8 +41,11 @@ struct InputEvent {
   // True marks a key (de)press; only used when device == Keyboard.
   bool key_down = false;
   bool key_repeat = false;
-  uint32_t keycode = 0;   // Linux evdev keycode (keysym already remapped upstream)
-  uint32_t keysym = 0;    // X11 keysym if remapped, else 0 (use keycode)
+  uint32_t keycode = 0;      // Linux evdev keycode
+  uint32_t keysym = 0;       // X11 keysym if remapped, else 0
+  // Pointer lifecycle: the cursor entered (kAdd) or left (kRemove) the view.
+  bool add = false;
+  bool remove = false;
 };
 
 // --- Backend -----------------------------------------------------------------

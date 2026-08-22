@@ -168,10 +168,13 @@ void OnPointerAxis(void* data, wl_pointer*, uint32_t, uint32_t axis,
 }
 void OnPointerEnter(void* data, wl_pointer*, uint32_t, wl_surface*,
                     wl_fixed_t sx, wl_fixed_t sy) {
-  static_cast<WaylandBackend*>(data)->OnPointerMotion(wl_fixed_to_double(sx),
-                                                      wl_fixed_to_double(sy));
+  auto* b = static_cast<WaylandBackend*>(data);
+  b->OnPointerEnter();
+  b->OnPointerMotion(wl_fixed_to_double(sx), wl_fixed_to_double(sy));
 }
-void OnPointerLeave(void*, wl_pointer*, uint32_t, wl_surface*) {}
+void OnPointerLeave(void* data, wl_pointer*, uint32_t, wl_surface*) {
+  static_cast<WaylandBackend*>(data)->OnPointerLeave();
+}
 void OnPointerAxisSource(void*, wl_pointer*, uint32_t) {}
 void OnPointerAxisStop(void*, wl_pointer*, uint32_t, uint32_t) {}
 void OnPointerAxisDiscrete(void*, wl_pointer*, uint32_t, int32_t) {}
@@ -438,6 +441,31 @@ void WaylandBackend::OnSeatCapabilities(wl_seat* seat, uint32_t caps) {
   }
 }
 
+void WaylandBackend::OnPointerEnter() {
+  if (!pointer_added_) {
+    pointer_added_ = true;
+    if (on_input_) {
+      InputEvent ev;
+      ev.device = InputDeviceKind::Mouse;
+      ev.add = true;  // kAdd: pointer entered the surface
+      on_input_(ev);
+    }
+  }
+}
+
+void WaylandBackend::OnPointerLeave() {
+  if (pointer_added_) {
+    pointer_added_ = false;
+    buttons_ = 0;
+    if (on_input_) {
+      InputEvent ev;
+      ev.device = InputDeviceKind::Mouse;
+      ev.remove = true;  // kRemove: pointer left the surface
+      on_input_(ev);
+    }
+  }
+}
+
 void WaylandBackend::OnPointerMotion(double x, double y) {
   pointer_x_ = x;
   pointer_y_ = y;
@@ -446,29 +474,28 @@ void WaylandBackend::OnPointerMotion(double x, double y) {
     ev.device = InputDeviceKind::Mouse;
     ev.x = x;
     ev.y = y;
+    ev.buttons = buttons_;
     on_input_(ev);
   }
 }
 
 void WaylandBackend::OnButtonPress(uint32_t button, bool pressed) {
+  uint32_t mask = 0;
+  switch (button) {
+    case BTN_LEFT:   mask = 0x1; break;
+    case BTN_RIGHT:  mask = 0x2; break;
+    case BTN_MIDDLE: mask = 0x4; break;
+    default: return;
+  }
+  if (pressed) buttons_ |= mask;
+  else buttons_ &= ~mask;
+
   if (on_input_) {
     InputEvent ev;
     ev.device = InputDeviceKind::Mouse;
     ev.x = pointer_x_;
     ev.y = pointer_y_;
-    switch (button) {
-      case BTN_LEFT:
-        ev.buttons |= 0x1;
-        break;
-      case BTN_RIGHT:
-        ev.buttons |= 0x2;
-        break;
-      case BTN_MIDDLE:
-        ev.buttons |= 0x4;
-        break;
-    }
-    if (pressed) buttons_ = ev.buttons;
-    else buttons_ &= ~(uint32_t)0;
+    ev.buttons = buttons_;
     on_input_(ev);
   }
 }

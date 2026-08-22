@@ -328,7 +328,22 @@ void Engine::SendInputEvent(const InputEvent& event) {
   pt.signal_kind = kFlutterPointerSignalKindNone;
   pt.view_id = 0;
 
-  // Infer the phase from button state transitions.
+  // Pointer lifecycle: kAdd when entering, kRemove when leaving. These must be
+  // sent before any button/motion events for the framework to track the cursor.
+  if (event.add) {
+    pt.phase = kAdd;
+    pt.buttons = 0;
+    FlutterEngineSendPointerEvent(engine_, &pt, 1);
+    return;
+  }
+  if (event.remove) {
+    pt.phase = kRemove;
+    pt.buttons = 0;
+    FlutterEngineSendPointerEvent(engine_, &pt, 1);
+    return;
+  }
+
+  // Infer the phase from button-state transitions.
   uint32_t pressed = event.buttons & 0x7;
   uint32_t old_pressed = last_buttons_ & 0x7;
   last_buttons_ = event.buttons;
@@ -337,7 +352,7 @@ void Engine::SendInputEvent(const InputEvent& event) {
     pt.phase = kUp;
     pt.signal_kind = kFlutterPointerSignalKindScroll;
     pt.scroll_delta_y = event.scroll_y;
-    pt.buttons = pressed;
+    pt.buttons = event.buttons;
     FlutterEngineSendPointerEvent(engine_, &pt, 1);
     return;
   }
@@ -347,11 +362,9 @@ void Engine::SendInputEvent(const InputEvent& event) {
   } else if (!pressed && old_pressed) {
     pt.phase = kUp;
   } else {
-    pt.phase = (pressed) ? kMove : (event.buttons & kFlutterPointerButtonMouseBack
-                                     ? kMove
-                                     : kHover);
+    pt.phase = pressed ? kMove : kHover;
   }
-  pt.buttons = pressed ? event.buttons : 0;
+  pt.buttons = event.buttons;
   FlutterEngineSendPointerEvent(engine_, &pt, 1);
 }
 

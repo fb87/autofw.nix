@@ -50,6 +50,8 @@ class WaylandBackend final : public Backend {
   void OnRegistryGlobal(wl_registry* registry, uint32_t name,
                         const char* interface, uint32_t version);
   void OnSeatCapabilities(wl_seat* seat, uint32_t caps);
+  void OnPointerEnter();
+  void OnPointerLeave();
   void OnPointerMotion(double x, double y);
   void OnButtonPress(uint32_t button, bool pressed);
   void OnAxis(uint32_t axis, double value);
@@ -95,6 +97,7 @@ class WaylandBackend final : public Backend {
   bool running_ = false;
   bool frame_visible_ = false;
   bool configured_ = false;  // xdg configure received and acked
+  bool pointer_added_ = false;  // kAdd sent to Flutter, awaiting kRemove
 
   // Frame counters for lightweight present-rate diagnostics.
   uint64_t frames_presented_ = 0;
