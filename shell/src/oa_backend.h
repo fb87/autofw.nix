@@ -60,9 +60,15 @@ class Backend {
   virtual bool Initialize() = 0;
 
   // The render thread entry point. The backend owns the event loop and invokes
-  // on_vsync() for every frame tick. This call blocks until Shutdown().
-  virtual void RunLoop(std::function<void(const FrameTick&)> on_vsync,
-                       std::function<void(const InputEvent&)> on_input) = 0;
+  // on_vsync() for every frame tick, on_input() for input events,
+  // on_resize(w,h,scale) when the display size/scale changes, and
+  // on_keymap(fd,size) when a Wayland keyboard keymap is supplied. This call
+  // blocks until Shutdown().
+  virtual void RunLoop(
+      std::function<void(const FrameTick&)> on_vsync,
+      std::function<void(const InputEvent&)> on_input,
+      std::function<void(uint32_t, uint32_t, double)> on_resize = {},
+      std::function<void(int, uint32_t)> on_keymap = {}) = 0;
 
   // Ask the backend (and therefore the engine) to stop at the very next
   // opportunity. Called from the platform thread.

@@ -28,7 +28,10 @@ class KmssBackend final : public Backend {
 
   bool Initialize() override;
   void RunLoop(std::function<void(const FrameTick&)> on_vsync,
-               std::function<void(const InputEvent&)> on_input) override;
+               std::function<void(const InputEvent&)> on_input,
+               std::function<void(uint32_t, uint32_t, double)> on_resize =
+                   {},
+               std::function<void(int, uint32_t)> on_keymap = {}) override;
   void RequestExit() override;
 
   void* egl_surface() override { return (void*)egl_surface_; }

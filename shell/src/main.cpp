@@ -172,7 +172,13 @@ int main(int argc, char** argv) {
   // rendering on internal render threads.
   backend->RunLoop(
       [&engine](const oa::FrameTick& tick) { engine->OnVsync(tick); },
-      [&engine](const oa::InputEvent& ev) { engine->SendInputEvent(ev); });
+      [&engine](const oa::InputEvent& ev) { engine->SendInputEvent(ev); },
+      [&engine](uint32_t w, uint32_t h, double dpi) {
+        engine->OnResize(w, h, dpi);
+      },
+      [&engine](int fd, uint32_t size) {
+        engine->SetKeyboardKeymap(fd, size);
+      });
 
   // Shutdown in reverse order of construction.
   if (producer.joinable()) {

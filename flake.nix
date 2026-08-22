@@ -69,6 +69,7 @@
             pkgs.libgbm     # GBM for the DRM/KMS backend
             pkgs.libdrm     # DRM access
             pkgs.libffi     # transitive dep of wayland-client
+            pkgs.libxkbcommon  # keyboard keymap translation
             flutter-engine  # the embedder library + headers
           ];
           cmakeFlags = [
@@ -96,6 +97,7 @@
             pkgs.libgbm
             pkgs.libdrm
             pkgs.libffi
+            pkgs.libxkbcommon
             pkgs.flutter.unwrapped
           ];
         };

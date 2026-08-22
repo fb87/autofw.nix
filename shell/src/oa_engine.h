@@ -12,6 +12,7 @@
 #include <EGL/egl.h>
 #include "flutter_embedder.h"
 #include "oa_backend.h"
+#include "oa_keyboard.h"
 #include "oa_task_runner.h"
 #include "oa_texture.h"
 
@@ -40,6 +41,15 @@ class Engine {
   // Forward a platform input event (pointer motion/button or keyboard) to the
   // Flutter framework on the platform thread.
   void SendInputEvent(const InputEvent& event);
+
+  // Supply the Wayland keyboard keymap (fd from wl_keyboard.keymap) so the
+  // engine can translate keycodes to Flutter logical keys / characters.
+  void SetKeyboardKeymap(int fd, uint32_t size);
+
+  // Notify the engine that the display/window size (or scale) changed so it
+  // re-lays-out the view. Called from the backend event loop on the platform
+  // thread.
+  void OnResize(uint32_t width, uint32_t height, double pixel_ratio);
 
   // --- External texture support --------------------------------------------
   // Register/unregister a texture with Flutter. The framework references it
@@ -98,6 +108,7 @@ class Engine {
   uint32_t last_buttons_ = 0;  // cached pointer button mask for phase synthesis
 
   TextureRegistry textures_;  // registered external textures
+  Keyboard keyboard_;          // keymap translation for key events
 };
 
 }  // namespace oa

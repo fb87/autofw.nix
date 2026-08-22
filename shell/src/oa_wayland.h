@@ -33,7 +33,9 @@ class WaylandBackend final : public Backend {
 
   bool Initialize() override;
   void RunLoop(std::function<void(const FrameTick&)> on_vsync,
-               std::function<void(const InputEvent&)> on_input) override;
+               std::function<void(const InputEvent&)> on_input,
+               std::function<void(uint32_t, uint32_t, double)> on_resize = {},
+               std::function<void(int, uint32_t)> on_keymap = {}) override;
   void RequestExit() override;
 
   void* egl_surface() override { return (void*)egl_surface_; }
@@ -58,6 +60,7 @@ class WaylandBackend final : public Backend {
   void OnKey(uint32_t keycode, bool down);
   void OnConfigure(uint32_t w, uint32_t h);
   void OnXdgConfigureAcked();
+  void OnKeymap(uint32_t format, int fd, uint32_t size);
   void OnFrameDone();
 
   // True once the compositor has sent+acked the first xdg configure, i.e. the
@@ -106,6 +109,8 @@ class WaylandBackend final : public Backend {
 
   std::function<void(const InputEvent&)> on_input_;
   std::function<void(const FrameTick&)> on_vsync_;
+  std::function<void(uint32_t, uint32_t, double)> on_resize_;  // size/scale change
+  std::function<void(int, uint32_t)> on_keymap_;               // wl keymap fd
 };
 
 }  // namespace oa

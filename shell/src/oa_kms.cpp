@@ -160,7 +160,9 @@ bool KmssBackend::SetupEgl() {
 }
 
 void KmssBackend::RunLoop(std::function<void(const FrameTick&)> on_vsync,
-                          std::function<void(const InputEvent&)> on_input) {
+                          std::function<void(const InputEvent&)> on_input,
+                          std::function<void(uint32_t, uint32_t, double)>,
+                          std::function<void(int, uint32_t)>) {
   on_vsync_ = std::move(on_vsync);
   on_input_ = std::move(on_input);
   running_ = true;

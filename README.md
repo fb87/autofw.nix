@@ -115,6 +115,21 @@ architecture-aware (`linux-x64` / `linux-arm64`).
 - Semantics (accessibility) callbacks are acknowledged but not yet surfaced to
   an a11y stack.
 
+## Input & resize
+
+**Pointer** (mouse/touch) is forwarded to the Flutter framework with the
+correct lifecycle (`kAdd`/`kRemove`), button masks, and `kDown`/`kUp`/`kMove`/
+`kHover` phases.
+
+**Keyboard** uses a libxkbcommon keymap (from the Wayland compositor) to map
+raw evdev keycodes to Flutter key events: `physical` = USB HID usage,
+`logical` = Flutter logical key id, and `character` = UTF-8 text, so typing in
+`TextField`s works.
+
+**Resize**: when the compositor reconfigures the window, the shell resizes the
+EGL/`wl_egl_window` surface and calls `FlutterEngineSendWindowMetricsEvent`, so
+the framework re-lays-out to the new physical size and pixel ratio.
+
 ## External textures
 
 The shell supports Flutter **external textures**, letting native code (e.g. an

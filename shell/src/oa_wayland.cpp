@@ -184,8 +184,9 @@ void OnKeyboardKey(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t key,
   static_cast<WaylandBackend*>(data)->OnKey(
       key, state == WL_KEYBOARD_KEY_STATE_PRESSED);
 }
-void OnKeyboardKeymap(void*, wl_keyboard*, uint32_t, int32_t, uint32_t) {
-  // Keymap fd: a production shell would mmap and translate to logical keys.
+void OnKeyboardKeymap(void* data, wl_keyboard*, uint32_t format, int32_t fd,
+                      uint32_t size) {
+  static_cast<WaylandBackend*>(data)->OnKeymap(format, fd, size);
 }
 void OnKeyboardEnter(void*, wl_keyboard*, uint32_t, wl_surface*, wl_array*) {}
 void OnKeyboardLeave(void*, wl_keyboard*, uint32_t, wl_surface*) {}
@@ -301,9 +302,14 @@ bool WaylandBackend::SetupEgl() {
 }
 
 void WaylandBackend::RunLoop(std::function<void(const FrameTick&)> on_vsync,
-                             std::function<void(const InputEvent&)> on_input) {
+                             std::function<void(const InputEvent&)> on_input,
+                             std::function<void(uint32_t, uint32_t, double)>
+                                 on_resize,
+                             std::function<void(int, uint32_t)> on_keymap) {
   on_vsync_ = std::move(on_vsync);
   on_input_ = std::move(on_input);
+  on_resize_ = std::move(on_resize);
+  on_keymap_ = std::move(on_keymap);
   running_ = true;
 
   // Drive rendering with a ~60Hz frame clock while also servicing Wayland
@@ -523,11 +529,29 @@ void WaylandBackend::OnKey(uint32_t keycode, bool down) {
 
 void WaylandBackend::OnConfigure(uint32_t w, uint32_t h) {
   if (window_) wl_egl_window_resize(window_, (int)w, (int)h, 0, 0);
-  width_ = (w ? w : width_);
-  height_ = (h ? h : height_);
+  const uint32_t nw = (w ? w : width_);
+  const uint32_t nh = (h ? h : height_);
+  const bool changed = (nw != width_ || nh != height_);
+  width_ = nw;
+  height_ = nh;
+  // Notify the Flutter engine so it re-lays-out to the new physical size.
+  if (changed && on_resize_) {
+    on_resize_(width_, height_, dpi_);
+  }
 }
 
 void WaylandBackend::OnXdgConfigureAcked() { configured_ = true; }
+
+void WaylandBackend::OnKeymap(uint32_t format, int fd, uint32_t size) {
+  // Only the canonical keymap formats are handled; the fd is transferred to
+  // the engine which mmaps and owns it.
+  if (on_keymap_ && fd >= 0) {
+    on_keymap_(fd, size);
+  } else if (fd >= 0) {
+    close(fd);
+  }
+  (void)format;
+}
 
 // --- Backend factory -----------------------------------------------------------
 Backend* CreateWaylandBackend() { return new WaylandBackend(); }

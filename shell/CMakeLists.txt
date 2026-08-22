@@ -35,6 +35,7 @@ find_library(FLUTTER_ENGINE_LIBRARY flutter_engine
 find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-egl)
+pkg_check_modules(XKBCOMMON REQUIRED IMPORTED_TARGET xkbcommon)
 
 # EGL / OpenGLES2 (libglvnd).
 find_path(EGL_INCLUDE_DIR NAMES EGL/egl.h)
@@ -67,6 +68,7 @@ set(SOURCES
   src/oa_task_runner.cpp
   src/oa_codec.cpp
   src/oa_texture.cpp
+  src/oa_keyboard.cpp
   src/protocol/xdg-shell-protocol.c
 )
 
@@ -83,6 +85,7 @@ target_link_libraries(openauto_shell PRIVATE
   "${EGL_LIBRARY}"
   "${GLES2_LIBRARY}"
   PkgConfig::WAYLAND
+  PkgConfig::XKBCOMMON
 )
 
 # Attach the DRM/KMS include/lib directories when present.

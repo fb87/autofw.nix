@@ -256,6 +256,35 @@ void Engine::SendMetrics() {
   FlutterEngineScheduleFrame(engine_);
 }
 
+void Engine::OnResize(uint32_t width, uint32_t height, double pixel_ratio) {
+  // The implicit (single) view targets the whole display. Send updated metrics
+  // so the framework re-lays-out the View to the new physical size/scale.
+  FlutterWindowMetricsEvent metrics = {};
+  metrics.struct_size = sizeof(metrics);
+  metrics.width = width ? width : backend_->width();
+  metrics.height = height ? height : backend_->height();
+  metrics.pixel_ratio = pixel_ratio > 0.0 ? pixel_ratio : backend_->dpi();
+  metrics.view_id = 0;
+  metrics.display_id = 0;
+  FlutterEngineSendWindowMetricsEvent(engine_, &metrics);
+
+  // Also refresh the display's registered geometry.
+  FlutterEngineDisplay display = {};
+  display.struct_size = sizeof(display);
+  display.single_display = true;
+  display.refresh_rate = 60.0;
+  display.width = metrics.width;
+  display.height = metrics.height;
+  display.device_pixel_ratio = metrics.pixel_ratio;
+  FlutterEngineNotifyDisplayUpdate(engine_,
+                                   kFlutterEngineDisplaysUpdateTypeStartup,
+                                   &display, 1);
+
+  std::fprintf(stderr,
+               "[oa-engine] resize -> %ux%u @%.2f (sent window metrics)\n",
+               metrics.width, metrics.height, metrics.pixel_ratio);
+}
+
 // --- External texture support ------------------------------------------------
 bool Engine::RegisterExternalTexture(int64_t texture_id) {
   textures_.Register(texture_id);
@@ -411,11 +440,14 @@ void Engine::HandlePathProviderMessage(const FlutterPlatformMessage* message) {
                method.c_str(), dir.c_str(), response.size(), rc);
 }
 
+void Engine::SetKeyboardKeymap(int fd, uint32_t size) {
+  keyboard_.SetKeymap(fd, size);
+}
+
 void Engine::SendInputEvent(const InputEvent& event) {
   if (event.device == InputDeviceKind::Keyboard) {
-    // Forward the raw Linux keycode as a Flutter key event. Flutter maps the
-    // physical key from the keycode; a full implementation would translate to
-    // USB HID codes and logical keys via the keymap.
+    OaKeyResult r = keyboard_.Translate(event.keycode, event.key_down);
+    // Continuous key repeat is delivered as separate repeat events.
     FlutterKeyEvent key = {};
     key.struct_size = sizeof(key);
     key.timestamp = FlutterEngineGetCurrentTime();
@@ -423,7 +455,12 @@ void Engine::SendInputEvent(const InputEvent& event) {
                    ? kFlutterKeyEventTypeRepeat
                    : (event.key_down ? kFlutterKeyEventTypeDown
                                      : kFlutterKeyEventTypeUp);
-    key.physical = key.logical = static_cast<uint64_t>(event.keycode);
+    key.physical = r.physical_hid;
+    key.logical = r.logical;
+    if (event.key_down && !r.character.empty()) {
+      key.character = r.character.c_str();
+    }
+    key.synthesized = false;
     key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
     FlutterEngineSendKeyEvent(engine_, &key, nullptr, nullptr);
     return;
