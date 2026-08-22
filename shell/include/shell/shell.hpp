@@ -24,5 +24,8 @@
 #include <shell/transition.hpp>
 #include <shell/vsync.hpp>
 
-#include <shell/backend/drm.hpp>
+#ifdef SHELL_BACKEND_WAYLAND
 #include <shell/backend/wayland.hpp>
+#else
+#include <shell/backend/drm.hpp>
+#endif

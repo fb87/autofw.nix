@@ -13,6 +13,8 @@
 #include <shell/shell.hpp>
 #ifdef SHELL_BACKEND_WAYLAND
 #include <shell/backend/wayland.hpp>
+#else
+#include <shell/backend/drm.hpp>
 #endif
 
 namespace
@@ -118,29 +120,7 @@ int main(int argc, char** argv)
     if (opts.icu.empty())
         opts.icu = opts.assets + "/icudtl.dat";
 
-    // Build the display backend selected at build time (SHELL_BACKEND_WAYLAND
-    // or SHELL_BACKEND_DRM) and expose it through the backend-agnostic
-    // `shell::backend::output` interface. The engine never sees backend types.
-#ifdef SHELL_BACKEND_WAYLAND
-    shell::backend::wayland::config cfg{.display = {}, .width = 1280, .height = 720};
-    shell::backend::wayland::state backend = shell::backend::wayland::create(cfg);
-
-    if (auto err = shell::backend::wayland::connect(backend); !err)
-    {
-        shell::log::info("wayland connect failed");
-        return 1;
-    }
-    if (auto err = shell::backend::wayland::setup_egl(backend); !err)
-    {
-        shell::log::info("wayland egl setup failed");
-        return 1;
-    }
-    if (auto err = shell::backend::wayland::setup_surface(backend); !err)
-    {
-        shell::log::info("wayland surface setup failed");
-        return 1;
-    }
-    shell::backend::output out = shell::backend::wayland::output::take(backend);
+    // The engine (declared first so backend callbacks can capture it).
     shell::engine::state engine;
     shell::renderer::type rtype = shell::renderer::type::automatic;
     if (opts.renderer == "software")
@@ -149,6 +129,44 @@ int main(int argc, char** argv)
         rtype = shell::renderer::type::gl;
     engine.cfg = shell::engine::config{
         .assets = opts.assets, .icu_data = opts.icu, .renderer = rtype};
+
+    shell::backend::output out{};
+
+#ifdef SHELL_BACKEND_WAYLAND
+    shell::backend::wayland::config cfg{.display = {}, .width = 1280, .height = 720};
+    shell::backend::wayland::state backend = shell::backend::wayland::create(cfg);
+    if (auto err = shell::backend::wayland::connect(backend); !err)
+        return 1;
+    if (auto err = shell::backend::wayland::setup_egl(backend); !err)
+        return 1;
+    if (auto err = shell::backend::wayland::setup_surface(backend); !err)
+        return 1;
+    out = shell::backend::wayland::output::take(backend);
+    backend.cb.on_vsync = [&] { shell::engine::on_vsync(engine); };
+    backend.cb.on_pointer = [&](const shell::input::pointer_event& ev)
+    { shell::engine::send_pointer(engine, ev); };
+    backend.cb.on_key = [&](std::uint32_t code, bool down)
+    { shell::engine::send_key(engine, code, down); };
+    backend.cb.on_keymap = [&](int fd, std::uint32_t size)
+    { shell::engine::on_keymap(engine, fd, size); };
+    backend.cb.on_resize = [&](std::uint32_t w, std::uint32_t h)
+    { shell::engine::on_resize(engine, w, h); };
+    backend.cb.on_close = [&] { shell::engine::on_close(engine); };
+#else
+    shell::backend::drm::config cfg{.device = "/dev/dri/card0"};
+    shell::backend::drm::state backend = shell::backend::drm::create(cfg);
+    if (auto err = shell::backend::drm::connect(backend); !err)
+    {
+        shell::log::info("drm connect failed");
+        return 1;
+    }
+    out = shell::backend::drm::output::take(backend);
+    backend.cb.on_vsync = [&] { shell::engine::on_vsync(engine); };
+    backend.cb.on_resize = [&](std::uint32_t w, std::uint32_t h)
+    { shell::engine::on_resize(engine, w, h); };
+    backend.cb.on_close = [&] { shell::engine::on_close(engine); };
+#endif
+
     engine.out = &out;
 
     if (auto err = shell::engine::init(engine); !err)
@@ -156,18 +174,6 @@ int main(int argc, char** argv)
         shell::log::info("engine init failed");
         return 1;
     }
-
-    // Wire the backend callbacks to the engine.
-    backend.cb.on_vsync = [&engine] { shell::engine::on_vsync(engine); };
-    backend.cb.on_pointer = [&engine](const shell::input::pointer_event& ev)
-    { shell::engine::send_pointer(engine, ev); };
-    backend.cb.on_key = [&engine](std::uint32_t code, bool down)
-    { shell::engine::send_key(engine, code, down); };
-    backend.cb.on_keymap = [&engine](int fd, std::uint32_t size)
-    { shell::engine::on_keymap(engine, fd, size); };
-    backend.cb.on_resize = [&engine](std::uint32_t w, std::uint32_t h)
-    { shell::engine::on_resize(engine, w, h); };
-    backend.cb.on_close = [&engine] { shell::engine::on_close(engine); };
 
     std::thread producer;
     bool producer_running = false;
@@ -177,7 +183,11 @@ int main(int argc, char** argv)
         producer = std::thread(run_demo_texture, &engine, &producer_running);
     }
 
+#ifdef SHELL_BACKEND_WAYLAND
     shell::backend::wayland::run(backend);
+#else
+    shell::backend::drm::run(backend);
+#endif
 
     if (producer.joinable())
     {
@@ -186,12 +196,10 @@ int main(int argc, char** argv)
         shell::engine::unregister_texture(engine, kDemoTextureId);
     }
     shell::engine::destroy(engine);
+#ifdef SHELL_BACKEND_WAYLAND
     shell::backend::wayland::destroy(backend);
-    return 0;
 #else
-    // DRM/KMS backend not yet implemented; the build config selects it but the
-    // runtime path is pending.
-    shell::log::info("DRM/KMS backend is not implemented yet");
-    return 1;
+    shell::backend::drm::destroy(backend);
 #endif
+    return 0;
 }
