@@ -38,6 +38,27 @@ void Keyboard::SetKeymap(int fd, uint32_t size) {
   close(fd);
 }
 
+void Keyboard::EnsureDefaultKeymap() {
+  if (state_ && keymap_) return;
+  if (!ctx_) ctx_ = xkb_context_new(XKB_CONTEXT_NO_FLAGS);
+  if (!ctx_) return;
+  static const xkb_rule_names kDefaultRules = {
+      .rules = "evdev", .model = "pc105", .layout = "us", .variant = nullptr,
+      .options = nullptr};
+  xkb_keymap* km = xkb_keymap_new_from_names(
+      ctx_, &kDefaultRules, XKB_KEYMAP_COMPILE_NO_FLAGS);
+  if (!km) {
+    std::fprintf(stderr, "[oa-keyboard] failed to build default keymap\n");
+    return;
+  }
+  if (keymap_) xkb_keymap_unref(keymap_);
+  if (state_) xkb_state_unref(state_);
+  keymap_ = km;
+  state_ = xkb_state_new(keymap_);
+  std::fprintf(stderr,
+               "[oa-keyboard] using default US keymap (compositor sent none)\n");
+}
+
 OaKeyResult Keyboard::Translate(uint32_t evdev_keycode, bool pressed) {
   OaKeyResult out;
   out.down = pressed;
@@ -46,11 +67,18 @@ OaKeyResult Keyboard::Translate(uint32_t evdev_keycode, bool pressed) {
   // provide a stable non-zero fallback derived from the HID code.
   out.logical = 0x00100010000ull | out.physical_hid;
 
+  // If the compositor never provided a keymap (e.g. via a virtual keyboard
+  // path that omits wl_keyboard.keymap), fall back to a default so character
+  // resolution works.
+  if (!state_ || !keymap_) {
+    EnsureDefaultKeymap();
+    if (!state_ || !keymap_) {
+      return out;
+    }
+  }
+
   // xkb uses 8 + evdev code as its keycode.
   const xkb_keycode_t xkc = static_cast<xkb_keycode_t>(evdev_keycode) + 8;
-  if (!state_ || !keymap_) {
-    return out;
-  }
   if (xkc >= xkb_keymap_min_keycode(keymap_) &&
       xkc <= xkb_keymap_max_keycode(keymap_)) {
     xkb_state_update_key(state_, xkc, pressed ? XKB_KEY_DOWN : XKB_KEY_UP);

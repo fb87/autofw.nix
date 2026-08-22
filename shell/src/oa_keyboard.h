@@ -32,6 +32,11 @@ class Keyboard {
 
   // (Re)load the keymap from a Wayland keymap fd (owned by callers' mmap).
   void SetKeymap(int fd, uint32_t size);
+  // True once a keymap has been installed.
+  bool HasKeymap() const { return state_ != nullptr; }
+  // If no compositor keymap is available, build a default (US) one so text
+  // input works even against compositors that omit wl_keyboard.keymap.
+  void EnsureDefaultKeymap();
 
   // Translate a single key event. |evdev_keycode| is the raw Linux/wayland
   // keycode (>= 8 per the 1-based xkb convention). Returns fields for Flutter.

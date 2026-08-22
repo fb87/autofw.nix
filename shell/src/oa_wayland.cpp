@@ -186,6 +186,9 @@ void OnKeyboardKey(void* data, wl_keyboard*, uint32_t, uint32_t, uint32_t key,
 }
 void OnKeyboardKeymap(void* data, wl_keyboard*, uint32_t format, int32_t fd,
                       uint32_t size) {
+  std::fprintf(stderr,
+               "[oa-wayland] wl_keyboard.keymap fd=%d size=%u format=%u\n", fd,
+               size, format);
   static_cast<WaylandBackend*>(data)->OnKeymap(format, fd, size);
 }
 void OnKeyboardEnter(void*, wl_keyboard*, uint32_t, wl_surface*, wl_array*) {}
@@ -431,6 +434,11 @@ void WaylandBackend::OnRegistryGlobal(wl_registry* registry, uint32_t name,
 
 void WaylandBackend::OnSeatCapabilities(wl_seat* seat, uint32_t caps) {
   if (!seat) return;
+  std::fprintf(stderr,
+               "[oa-wayland] seat caps=0x%x (ptr=%d kbd=%d) has_kbd=%d\n",
+               caps, (caps & WL_SEAT_CAPABILITY_POINTER) ? 1 : 0,
+               (caps & WL_SEAT_CAPABILITY_KEYBOARD) ? 1 : 0,
+               keyboard_ ? 1 : 0);
   if ((caps & WL_SEAT_CAPABILITY_POINTER) && !pointer_) {
     pointer_ = wl_seat_get_pointer(seat);
     wl_pointer_add_listener(pointer_, &g_pointer_listener, this);
@@ -518,6 +526,8 @@ void WaylandBackend::OnAxis(uint32_t axis, double value) {
 }
 
 void WaylandBackend::OnKey(uint32_t keycode, bool down) {
+  std::fprintf(stderr, "[oa-wayland] key event code=%u down=%d\n", keycode,
+               down);
   if (on_input_) {
     InputEvent ev;
     ev.device = InputDeviceKind::Keyboard;

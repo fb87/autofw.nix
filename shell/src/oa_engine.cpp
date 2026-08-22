@@ -449,6 +449,12 @@ void Engine::SetKeyboardKeymap(int fd, uint32_t size) {
 void Engine::SendInputEvent(const InputEvent& event) {
   if (event.device == InputDeviceKind::Keyboard) {
     OaKeyResult r = keyboard_.Translate(event.keycode, event.key_down);
+    std::fprintf(stderr,
+                 "[oa-engine] key evdev=%u down=%d -> hid=0x%x logical=0x%llx "
+                 "char='%s' has_keymap=%d\n",
+                 event.keycode, event.key_down ? 1 : 0, r.physical_hid,
+                 (unsigned long long)r.logical, r.character.c_str(),
+                 keyboard_.HasKeymap() ? 1 : 0);
     struct CapturedKey {
       FlutterEngine engine;
       FlutterKeyEventType type;
@@ -485,7 +491,14 @@ void Engine::SendInputEvent(const InputEvent& event) {
                                            : nullptr;
         key.synthesized = false;
         key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
-        FlutterEngineSendKeyEvent(captured->engine, &key, nullptr, nullptr);
+        FlutterEngineResult r =
+            FlutterEngineSendKeyEvent(captured->engine, &key, nullptr, nullptr);
+        std::fprintf(stderr,
+                     "[oa-engine] SendKeyEvent(platform-thread) type=%d "
+                     "phys=0x%llx log=0x%llx char='%s' rc=%d\n",
+                     (int)key.type, (unsigned long long)key.physical,
+                     (unsigned long long)key.logical,
+                     key.character ? key.character : "", (int)r);
       });
     } else {
       FlutterKeyEvent key = {};
