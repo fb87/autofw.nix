@@ -11,7 +11,9 @@
 
 #include <cstdint>
 
+#include <shell/renderer.hpp>
 #include <shell/result.hpp>
+#include <shell/software.hpp>
 
 namespace shell::backend
 {
@@ -43,6 +45,9 @@ struct output
 
     present_fn present{};
     stop_fn stop{};
+
+    // Software-rendering present path (disabled/null for accelerated backends).
+    renderer::software::presenters software_present{};
 };
 
 }  // namespace shell::backend

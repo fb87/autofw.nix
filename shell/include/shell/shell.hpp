@@ -13,9 +13,11 @@
 #include <shell/log.hpp>
 #include <shell/native.hpp>
 #include <shell/plugin.hpp>
+#include <shell/renderer.hpp>
 #include <shell/result.hpp>
 #include <shell/selection.hpp>
 #include <shell/shared.hpp>
+#include <shell/software.hpp>
 #include <shell/stage.hpp>
 #include <shell/surface.hpp>
 #include <shell/texture.hpp>

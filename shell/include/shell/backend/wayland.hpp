@@ -1,3 +1,5 @@
+#define _GNU_SOURCE 1
+
 #pragma once
 
 #include <cstdint>
@@ -8,6 +10,8 @@
 #include <linux/input-event-codes.h>
 #include <poll.h>
 #include <sys/errno.h>
+#include <sys/mman.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <chrono>
@@ -59,6 +63,9 @@ struct state
     wl_pointer* pointer{};
     wl_keyboard* keyboard{};
     wl_callback* frame_cb{};
+    wl_shm* shm{};
+    wl_buffer* shm_buffer{};
+    std::size_t shm_pool_size{};
     wl_egl_window* wl_window{};
     xdg_wm_base* wm_base{};
     xdg_surface* xs{};
@@ -166,6 +173,9 @@ inline void reg_global(void* d, wl_registry* reg, std::uint32_t name,
         s->seat = static_cast<wl_seat*>(
             wl_registry_bind(reg, name, &wl_seat_interface, 7));
         wl_seat_add_listener(s->seat, &kSeat, s);
+    } else if (std::strcmp(iface, wl_shm_interface.name) == 0) {
+        s->shm = static_cast<wl_shm*>(
+            wl_registry_bind(reg, name, &wl_shm_interface, 1));
     }
     (void)version;
 }
@@ -392,6 +402,12 @@ inline auto destroy(state& s) -> void
 }
 
 // ---- generic output adapter -------------------------------------------------
+// Forward declaration (defined below).
+namespace detail
+{
+bool software_present(void* d, const renderer::software::buffer& frame);
+}
+
 // Expose this Wayland backend through the backend-agnostic `shell::backend::output`
 // interface so the engine can run without depending on Wayland headers.
 namespace output
@@ -416,7 +432,59 @@ inline auto take(shell::backend::wayland::state& s) -> shell::backend::output
     o.pixel_ratio = s.dpi;
     o.present = &present;
     o.stop = &stop;
+    o.software_present.output = &s;
+    o.software_present.present = &detail::software_present;
     return o;
 }
 }  // namespace output
+
+// ---- software (wl_shm) presentation
+namespace detail
+{
+inline bool software_present(void* d, const renderer::software::buffer& frame)
+{
+    auto* s = static_cast<shell::backend::wayland::state*>(d);
+    if (!s->shm || !s->surface) return false;
+
+    if (frame.stride == 0 || frame.height == 0) return false;
+    std::size_t size = static_cast<std::size_t>(frame.stride) * frame.height;
+
+    // Create an anonymous shared-memory file sized for the frame.
+    int fd = static_cast<int>(memfd_create("flshell-shm", 0));
+    if (fd < 0) {
+        fd = ::shm_open("/flshell-shm", O_RDWR | O_CREAT, 0600);
+        if (fd < 0) return false;
+    }
+    if (ftruncate(fd, static_cast<off_t>(size)) < 0) { ::close(fd); return false; }
+
+    void* mapped = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (mapped == MAP_FAILED) { ::close(fd); return false; }
+    // Copy the CPU frame (bgra8888) row by row.
+    auto* dst = static_cast<std::uint8_t*>(mapped);
+    const auto* src = reinterpret_cast<const std::uint8_t*>(frame.pixels.data());
+    for (std::uint32_t y = 0; y < frame.height; ++y) {
+        std::memcpy(dst + static_cast<std::size_t>(y) * frame.stride,
+                    src + static_cast<std::size_t>(y) * frame.stride,
+                    frame.stride);
+    }
+    // Release the previous wl_buffer and build a new one.
+    if (s->shm_buffer) wl_buffer_destroy(s->shm_buffer);
+    wl_shm_pool* pool = wl_shm_create_pool(s->shm, fd, static_cast<std::int32_t>(size));
+    s->shm_buffer = wl_shm_pool_create_buffer(
+        pool, 0, static_cast<std::int32_t>(frame.width),
+        static_cast<std::int32_t>(frame.height), static_cast<std::int32_t>(frame.stride),
+        WL_SHM_FORMAT_ARGB8888);
+    wl_shm_pool_destroy(pool);
+    munmap(mapped, size);
+    ::close(fd);
+
+    // Attach and present the buffer on the surface.
+    wl_surface_attach(s->surface, s->shm_buffer, 0, 0);
+    wl_surface_damage(s->surface, 0, 0, static_cast<std::int32_t>(frame.width),
+                      static_cast<std::int32_t>(frame.height));
+    wl_surface_commit(s->surface);
+    wl_display_flush(s->display);
+    return true;
+}
+}  // namespace detail
 }  // namespace shell::backend::wayland

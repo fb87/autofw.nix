@@ -10,6 +10,7 @@
 
 #include <shell/shell.hpp>
 #include <shell/engine.hpp>
+#include <shell/renderer.hpp>
 #include <shell/backend/wayland.hpp>
 
 namespace
@@ -18,6 +19,7 @@ struct options
 {
     std::string assets;
     std::string icu;
+    std::string renderer{"gl"};  // "gl" | "software"
     bool test_texture{};
 };
 
@@ -27,6 +29,7 @@ void print_usage(const char* prog)
                  "usage: %s [options]\n"
                  "  --assets P       Flutter asset directory (required)\n"
                  "  --icu P          icudtl.dat path (default <assets>/icudtl.dat)\n"
+                 "  --renderer R     gl | software (default gl)\n"
                  "  --test-texture   run a demo external-texture producer\n"
                  "  --help           show this help\n",
                  prog);
@@ -37,16 +40,18 @@ options parse_args(int argc, char** argv)
     static const option kLong[] = {
         {"assets", required_argument, nullptr, 'a'},
         {"icu", required_argument, nullptr, 'i'},
+        {"renderer", required_argument, nullptr, 'r'},
         {"test-texture", no_argument, nullptr, 't'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
     options out;
     int c;
-    while ((c = getopt_long(argc, argv, "a:i:th", kLong, nullptr)) != -1) {
+    while ((c = getopt_long(argc, argv, "a:i:r:th", kLong, nullptr)) != -1) {
         switch (c) {
             case 'a': out.assets = optarg; break;
             case 'i': out.icu = optarg; break;
+            case 'r': out.renderer = optarg; break;
             case 't': out.test_texture = true; break;
             case 'h':
             default:
@@ -120,7 +125,11 @@ int main(int argc, char** argv)
     shell::backend::output out = shell::backend::wayland::output::take(backend);
 
     shell::engine::state engine;
-    engine.cfg = shell::engine::config{.assets = opts.assets, .icu_data = opts.icu};
+    shell::renderer::type rtype = shell::renderer::type::automatic;
+    if (opts.renderer == "software") rtype = shell::renderer::type::software;
+    else if (opts.renderer == "gl") rtype = shell::renderer::type::gl;
+    engine.cfg = shell::engine::config{.assets = opts.assets, .icu_data = opts.icu,
+                                       .renderer = rtype};
     engine.out = &out;
 
     if (auto err = shell::engine::init(engine); !err) {

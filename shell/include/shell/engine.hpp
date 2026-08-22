@@ -14,16 +14,17 @@
 #include <string_view>
 #include <thread>
 
-#include <EGL/egl.h>
-
 #include <flutter_embedder.h>
 
 #include <shell/backend.hpp>
+#ifdef SHELL_RENDERER_GL
 #include <shell/egl.hpp>
+#endif
 #include <shell/error.hpp>
 #include <shell/input.hpp>
 #include <shell/keyboard.hpp>
 #include <shell/log.hpp>
+#include <shell/renderer.hpp>
 #include <shell/result.hpp>
 #include <shell/texture.hpp>
 
@@ -34,6 +35,7 @@ struct config
 {
     std::string_view assets;
     std::string_view icu_data;
+    renderer::type renderer{renderer::type::automatic};
 };
 
 // The Flutter engine wrapper.
@@ -46,9 +48,12 @@ struct state
     backend::output* out{};
 
     FlutterEngine fl{};
+
+#ifdef SHELL_RENDERER_GL
     EGLContext gl_ctx{EGL_NO_CONTEXT};
     EGLContext resource_ctx{EGL_NO_CONTEXT};
     EGLContext upload_ctx{EGL_NO_CONTEXT};
+#endif
 
     texture::state textures;
     keyboard::state kb;

@@ -35,6 +35,8 @@ add_library(shell_impl INTERFACE)
 target_include_directories(shell_impl INTERFACE
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${FLUTTER_EMBEDDER_INCLUDE_DIR} ${EGL_INCLUDE_DIR} ${GLES2_INCLUDE_DIR})
+# Accelerated (EGL/OpenGL ES) renderer is compiled in by default.
+target_compile_definitions(shell_impl INTERFACE SHELL_RENDERER_GL=1)
 target_link_libraries(shell_impl INTERFACE
   ${FLUTTER_ENGINE_LIBRARY} ${EGL_LIBRARY} ${GLES2_LIBRARY}
   PkgConfig::WAYLAND PkgConfig::XKBCOMMON)

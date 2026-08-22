@@ -51,6 +51,22 @@ producer. `flake.nix` builds it as `.#shell` (`flshell-app`).
 
 Both converge on EGL/OpenGLES2, giving Flutter a standard `kOpenGL` renderer.
 
+## Renderer
+
+Renderer selection is independent of the display backend (see `renderer.hpp`):
+`automatic`, `gl`, or `software`.
+
+- **`gl`** — accelerated EGL/OpenGL ES path (default).
+- **`software`** — Flutter's software renderer over CPU buffers; Wayland
+  presents via `wl_shm`, DRM via CPU dumb buffers.
+
+The engine only depends on EGL under `SHELL_RENDERER_GL`; a software-only build
+omits it. Choose at runtime with `--renderer=gl|software`.
+
+```sh
+./result-shell/bin/flshell_app --assets=APP --icu=ICU --renderer=software
+```
+
 ## Build & run
 
 ```sh

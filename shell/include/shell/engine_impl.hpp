@@ -9,6 +9,7 @@ namespace shell::engine
 namespace detail
 {
 
+#ifdef SHELL_RENDERER_GL
 bool make_current(void* d)
 {
     auto* s = static_cast<state*>(d);
@@ -45,11 +46,30 @@ void* gl_proc_resolver(void*, const char* name)
     return reinterpret_cast<void*>(eglGetProcAddress(name));
 }
 
+#endif  // SHELL_RENDERER_GL
+
 void vsync_request(void* d, std::intptr_t baton)
 {
     auto* s = static_cast<state*>(d);
     std::lock_guard lock(s->vsync_mutex);
     s->batons.push(baton);
+}
+
+// Flutter's software renderer presents a completed CPU pixel buffer. We pack
+// it into a software::buffer and hand it to the backend's software present path.
+bool software_present(void* d, const void* allocation, std::size_t row_bytes,
+                      std::size_t height)
+{
+    auto* s = static_cast<state*>(d);
+    if (!s->out->software_present.present) return false;
+    renderer::software::buffer frame{};
+    auto* bytes = static_cast<const std::byte*>(allocation);
+    frame.pixels = {const_cast<std::byte*>(bytes), row_bytes * height};
+    frame.width = static_cast<std::uint32_t>(row_bytes / 4);  // 4 bytes/px (BGRA8888)
+    frame.height = static_cast<std::uint32_t>(height);
+    frame.stride = static_cast<std::uint32_t>(row_bytes);
+    frame.format = renderer::software::pixel_format::bgra8888;
+    return s->out->software_present.present(s->out->software_present.output, frame);
 }
 
 bool external_texture_frame(void* d, std::int64_t id, std::size_t, std::size_t,
@@ -128,24 +148,47 @@ inline auto stop_runner(state& s) -> void
 
 inline auto init(state& s) -> result<void>
 {
-    EGLDisplay dpy = static_cast<EGLDisplay>(s.out->egl_display);
-    EGLConfig cfg = static_cast<EGLConfig>(s.out->egl_config);
-    s.gl_ctx = egl::create_context(dpy, cfg, EGL_NO_CONTEXT);
-    if (s.gl_ctx == EGL_NO_CONTEXT) {
-        return std::unexpected(error{.code = error_code::egl, .message = "gl context"});
-    }
-    s.resource_ctx = egl::create_context(dpy, cfg, s.gl_ctx);
-    s.upload_ctx = egl::create_context(dpy, cfg, s.gl_ctx);
+    // Renderer selection is independent of the display backend: accelerated
+    // (EGL/OpenGL ES) or software (CPU buffer). The GL path is only compiled
+    // when SHELL_RENDERER_GL is defined; without it, software is used.
+    bool use_gl = false;
+#ifdef SHELL_RENDERER_GL
+    use_gl = s.cfg.renderer != renderer::type::software;
+#endif
 
+    FlutterSoftwareRendererConfig sw = {};
+    FlutterRendererConfig rc = {};
+
+#ifdef SHELL_RENDERER_GL
     FlutterOpenGLRendererConfig gl = {};
-    gl.struct_size = sizeof(gl);
-    gl.make_current = detail::make_current;
-    gl.clear_current = detail::clear_current;
-    gl.present = detail::present;
-    gl.fbo_callback = detail::fbo;
-    gl.make_resource_current = detail::make_resource_current;
-    gl.gl_proc_resolver = detail::gl_proc_resolver;
-    gl.gl_external_texture_frame_callback = detail::external_texture_frame;
+    if (use_gl) {
+        EGLDisplay dpy = static_cast<EGLDisplay>(s.out->egl_display);
+        EGLConfig cfg = static_cast<EGLConfig>(s.out->egl_config);
+        s.gl_ctx = egl::create_context(dpy, cfg, EGL_NO_CONTEXT);
+        if (s.gl_ctx == EGL_NO_CONTEXT) {
+            return std::unexpected(error{.code = error_code::egl, .message = "gl context"});
+        }
+        s.resource_ctx = egl::create_context(dpy, cfg, s.gl_ctx);
+        s.upload_ctx = egl::create_context(dpy, cfg, s.gl_ctx);
+
+        gl.struct_size = sizeof(gl);
+        gl.make_current = detail::make_current;
+        gl.clear_current = detail::clear_current;
+        gl.present = detail::present;
+        gl.fbo_callback = detail::fbo;
+        gl.make_resource_current = detail::make_resource_current;
+        gl.gl_proc_resolver = detail::gl_proc_resolver;
+        gl.gl_external_texture_frame_callback = detail::external_texture_frame;
+        rc.type = kOpenGL;
+        rc.open_gl = gl;
+    }
+#endif
+    if (!use_gl) {
+        sw.struct_size = sizeof(sw);
+        sw.surface_present_callback = detail::software_present;
+        rc.type = kSoftware;
+        rc.software = sw;
+    }
 
     start_runner(s);
     FlutterTaskRunnerDescription pr = task_runner_description(s);
@@ -167,10 +210,6 @@ inline auto init(state& s) -> result<void>
     args.platform_message_callback = detail::on_platform_message;
     args.update_semantics_callback = detail::empty_semantics;
     args.custom_task_runners = &cr;
-
-    FlutterRendererConfig rc = {};
-    rc.type = kOpenGL;
-    rc.open_gl = gl;
 
     FlutterEngine fl = nullptr;
     if (FlutterEngineInitialize(FLUTTER_ENGINE_VERSION, &rc, &args, &s, &fl) != kSuccess) {
@@ -314,6 +353,7 @@ inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,
                                std::uint32_t h, std::span<const std::uint8_t> rgba) -> bool
 {
     if (!texture::has(s.textures, id)) return false;
+#ifdef SHELL_RENDERER_GL
     EGLDisplay dpy = static_cast<EGLDisplay>(s.out->egl_display);
     eglBindAPI(EGL_OPENGL_ES_API);
     bool ok = eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, s.upload_ctx) == EGL_TRUE;
@@ -323,6 +363,12 @@ inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,
     }
     if (!ok) return false;
     return FlutterEngineMarkExternalTextureFrameAvailable(s.fl, id) == kSuccess;
+#else
+    // Software mode has no GL upload context; GL-backed external textures are
+    // unsupported and must fail capability negotiation cleanly.
+    (void)w; (void)h; (void)rgba;
+    return false;
+#endif
 }
 
 namespace detail
