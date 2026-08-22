@@ -104,7 +104,10 @@ void LogMessage(const char* tag, const char* message, void* /*user_data*/) {
 namespace oa {
 
 Engine::~Engine() {
-  if (platform_task_runner_) platform_task_runner_->RequestStop();
+  // Shut the engine down FIRST so its teardown platform tasks are still
+  // serviced by the (still-running) platform task runner. Only after shutdown
+  // completes do we stop the runner (its member destructor does that), letting
+  // in-flight tasks drain without posting new work to a vanished thread.
   if (engine_) {
     FlutterEngineShutdown(engine_);
     engine_ = nullptr;
