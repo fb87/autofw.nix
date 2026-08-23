@@ -1,5 +1,7 @@
 .dart_tool/
 build/
+# Engine fonts copied into assets/ during `flutter build bundle`.
+/assets/
 .packages
 pubspec.lock
 .flutter-plugins
