@@ -77,7 +77,8 @@ struct state
     bool running{};
     bool configured{};
     bool pointer_added{};
-    bool frame_ready{};   // compositor has shown a frame and awaits the next
+    bool frame_ready{};         // a frame callback has fired (ready for next)
+    bool frame_in_flight{};     // a vsync was handed out, awaiting a present
     bool presented_once{};
     std::uint32_t buttons{};
     double pointer_x{};
@@ -152,7 +153,10 @@ inline void frame_done(void* d, wl_callback* cb, std::uint32_t)
     // The compositor has displayed the previous buffer; the FrameClife says we
     // may submit the next one. Signal one vsync to the engine (consumed by run).
     if (s->frame_cb == cb) s->frame_cb = nullptr;
+    // The compositor has displayed the previous buffer; a new frame may be
+    // submitted now.
     s->frame_ready = true;
+    s->frame_in_flight = false;
 }
 } // namespace detail
 
@@ -455,27 +459,36 @@ inline auto arm_frame(state& s) -> void
 inline auto run(state& s) -> void
 {
     s.running = true;
-    // Bootstrap: before any frame is presented no frame callback will arrive,
-    // so give the engine one initial vsync to start drawing.
+    // Drive vsync on a ~60 Hz timer (the DESIGN-listed fallback). The engine
+    // only consumes a vsync when it has a pending request, so over-provisioning
+    // ticks is harmless; the compositor frame callback (frame_ready) can be
+    // layered on top later to eliminate over-draw.
+    constexpr auto kPeriod = std::chrono::milliseconds(16);
+    auto next_tick = std::chrono::steady_clock::now();
     if (s.cb.on_vsync) s.cb.on_vsync();
 
     while (s.running)
     {
+        auto now = std::chrono::steady_clock::now();
+        auto to = next_tick - now;
+        if (to < std::chrono::steady_clock::duration::zero()) to = {};
+        int to_ms = static_cast<int>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(to).count());
+
         pollfd pfd{};
         pfd.fd = wl_display_get_fd(s.display);
         pfd.events = POLLIN;
-        int rc = poll(&pfd, 1, 20);
+        int rc = poll(&pfd, 1, to_ms);
         if (rc > 0 && (pfd.revents & POLLIN))
         {
             wl_display_dispatch(s.display);
             wl_display_flush(s.display);
         }
-        // Render only when the compositor has acknowledged the previous frame
-        // (frame callback fired). Consume the one-shot frame_ready flag.
-        if (s.frame_ready && s.cb.on_vsync)
+        now = std::chrono::steady_clock::now();
+        if (s.cb.on_vsync && now >= next_tick)
         {
-            s.frame_ready = false;
             s.cb.on_vsync();
+            next_tick += kPeriod;
         }
     }
 }
@@ -497,6 +510,7 @@ inline auto swap(state& s) -> bool
     if (ok)
     {
         s.presented_once = true;
+        s.frame_in_flight = false;
         // Ask the compositor to report when this frame has been shown; that
         // frame callback is the vsync that gates the engine's next render.
         arm_frame(s);
@@ -576,7 +590,6 @@ inline bool software_present(void* d, const renderer::software::buffer& frame)
         return false;
     std::size_t size = static_cast<std::size_t>(frame.stride) * frame.height;
 
-    // Create an anonymous shared-memory file sized for the frame.
     int fd = static_cast<int>(memfd_create("shell-shm", 0));
     if (fd < 0)
     {
@@ -630,6 +643,7 @@ inline bool software_present(void* d, const renderer::software::buffer& frame)
         wl_callback_add_listener(s->frame_cb, &kFrame, s);
     }
     s->presented_once = true;
+    s->frame_in_flight = false;
     wl_display_flush(s->display);
     return true;
 }
