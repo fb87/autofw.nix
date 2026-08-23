@@ -1,0 +1,15 @@
+{
+  "name": "shell_channel_demo",
+  "description": "Demonstrates the shell::channel platform-message bridge from Flutter (MethodChannel + path_provider).",
+  "version": "0.1.0",
+  "publish_to": "none",
+  "environment": {
+    "sdk": ">=3.0.0 <4.0.0"
+  },
+  "dependencies": {
+    "flutter": {
+      "sdk": "flutter"
+    },
+    "path_provider": "^2.1.0"
+  }
+}

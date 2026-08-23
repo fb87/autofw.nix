@@ -256,6 +256,18 @@ inline auto init(state& s) -> result<void>
             error{.code = error_code::flutter, .message = "run failed"});
     }
 
+    // Demo platform channel: 'shell/demo' echoes a canned reply so a Dart app
+    // can verify the two-way message bridge.
+    channel::register_channel(
+        s.channels, "shell/demo",
+        [](const std::string& method) -> result<std::vector<std::uint8_t>>
+        {
+            if (method == "echo")
+                return codec::encode_string("pong");
+            return std::unexpected(
+                error{.code = error_code::plugin, .message = "unknown demo method"});
+        });
+
     FlutterEngineDisplay display = {};
     display.struct_size = sizeof(display);
     display.single_display = true;
@@ -464,8 +476,15 @@ bool external_texture_frame(void*, std::int64_t, std::size_t, std::size_t,
 
 void on_platform_message(const FlutterPlatformMessage* m, void* d)
 {
-    FlutterEngineSendPlatformMessageResponse(static_cast<state*>(d)->fl,
-                                             m->response_handle, nullptr, 0);
+    auto* e = static_cast<state*>(d);
+    if (m == nullptr || e->fl == nullptr)
+        return;
+    // Route named platform-message channels through the channel registry.
+    std::vector<std::uint8_t> payload = channel::dispatch(
+        e->channels, m->channel, std::span(m->message, m->message_size));
+    FlutterEngineSendPlatformMessageResponse(e->fl, m->response_handle,
+                                             payload.empty() ? nullptr : payload.data(),
+                                             payload.size());
 }
 } // namespace detail
 

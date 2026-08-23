@@ -17,6 +17,7 @@
 #include <flutter_embedder.h>
 
 #include <shell/backend.hpp>
+#include <shell/channel.hpp>
 #ifdef SHELL_RENDERER_GL
 #include <shell/egl.hpp>
 #endif
@@ -57,6 +58,7 @@ struct state
 
     texture::state textures;
     keyboard::state kb;
+    channel::state channels;
 
     std::mutex runner_mutex;
     std::condition_variable runner_cv;
