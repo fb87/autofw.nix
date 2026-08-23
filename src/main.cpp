@@ -148,8 +148,19 @@ void run_input_test(shell::engine::state* e, bool* running)
         shell::engine::queue_key(*e, code, false);
         std::this_thread::sleep_for(std::chrono::milliseconds(80));
     }
-    std::fprintf(stderr, "[test-input] queued %zu key sequences\n",
-                 sizeof(kKeys) / sizeof(kKeys[0]));
+    // Key-repeat test: hold 'x' (code 45) so the compositor would fire many
+    // back-to-back key-downs. Each down of a printable key must insert one
+    // character, so 10 downs -> 10 'x' in the text.
+    constexpr int kRepeats = 10;
+    std::fprintf(stderr, "[test-input] repeat test: %d down-events of 'x'\n", kRepeats);
+    for (int i = 0; i < kRepeats; ++i)
+    {
+        shell::engine::queue_key(*e, 45, true);  // KEY_X down (a repeat)
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+    }
+    shell::engine::queue_key(*e, 45, false);       // release
+    std::fprintf(stderr, "[test-input] queued %zu key sequences + %d repeats\n",
+                 sizeof(kKeys) / sizeof(kKeys[0]), kRepeats);
     *running = false;
 }
 } // namespace
