@@ -40,21 +40,24 @@ channels register a method handler; the engine routes each inbound
 
 - Built-in `path_provider` returns a writable documents path (used by
   `get_storage` / `path_provider`).
-- A demo channel `shell/demo` echoes a canned reply so a Dart app can verify the
-  two-way bridge.
+- A gallery channel `shell/demo` echoes a canned reply so a Dart app can verify
+  the two-way bridge.
+- `shell/calc` decodes `[a, b]` int method arguments and returns add/mul results.
+- `shell/texture` registers external textures and pushes CPU RGBA frames that the
+  GL renderer uploads and Flutter composites.
 
-Flutter-side: `flutter/` holds the framework widgets; a runnable example
-lives in `examples/channel_demo/` (custom MethodChannel + path_provider).
-
-```sh
-# build the Flutter demo assets, then run
-(cd examples/channel_demo && flutter build bundle --target-platform linux-x64)
-./result-shell/bin/shell_app --assets=examples/channel_demo/build/flutter_assets ...
-
-## Run the demo with nix run
+Flutter-side: `flutter/` holds the framework widgets; a runnable gallery lives in
+`examples/gallery/` (custom method channels + external textures).
 
 ```sh
-nix run .#channel-demo
+# build the Flutter gallery assets, then run
+(cd examples/gallery && flutter build bundle --target-platform linux-x64)
+./result-shell/bin/shell_app --assets=examples/gallery/build/flutter_assets ...
+
+## Run the gallery with nix run
+
+```sh
+nix run .#gallery
 ```
 
 ```

@@ -1,6 +1,5 @@
 .dart_tool/
-build/flutter_assets/*.d  # ignore kernel snapshot dep files
-build/app*
+build/
 .packages
 pubspec.lock
 .flutter-plugins

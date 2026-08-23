@@ -33,7 +33,7 @@
           else
             throw "Unsupported system '${system}' for the Flutter embedder";
 
-        # Seconds after which `nix run .#channel-demo` stops the demo app.
+        # Seconds after which `nix run .#gallery` stops the gallery app.
         demoTimeout = 60;
 
         flutter-engine = pkgs.stdenvNoCC.mkDerivation {
@@ -90,18 +90,18 @@
         shell-wayland-software = shellFor "wayland" "software";
         shell-drm = shellFor "drm" "gl";
         shell-drm-software = shellFor "drm" "software";
-        # Prebuilt Flutter assets for the channel demo (kernel_blob.bin, icons,
-        # shaders and icudtl.dat). Built once offline (see examples/channel_demo)
+        # Prebuilt Flutter assets for the shell gallery (kernel_blob.bin, icons,
+        # shaders and icudtl.dat). Built once offline (see examples/gallery)
         # and checked into assets-bundle/ so the sandboxed build stays offline.
-        demoAssets = pkgs.runCommandLocal "channel-demo-assets" {} ''
+        galleryAssets = pkgs.runCommandLocal "shell-gallery-assets" {} ''
           mkdir -p $out
-          cp -r ${./examples/channel_demo/assets-bundle}/* $out/
+          cp -r ${./examples/gallery/assets-bundle}/* $out/
         '';
 
         # A self-contained `nix run` target: the Wayland/GL shell driving the
-        # channel demo assets, bounded by a timeout so it never runs forever
-        # on a headless/CI box. Override with `nix run .#channel-demo -- 300`.
-        channel-demo = pkgs.writeShellScriptBin "channel-demo" ''
+        # gallery assets, bounded by a timeout so it never runs forever on a
+        # headless/CI box. Override with `nix run .#gallery -- 300`.
+        gallery = pkgs.writeShellScriptBin "gallery" ''
           timeout_s="${toString demoTimeout}"
           if [ "$#" -gt 0 ] && [ "$1" -ge 0 ] 2>/dev/null; then
             timeout_s="$1"
@@ -109,24 +109,24 @@
           fi
           exec ${pkgs.coreutils}/bin/timeout "$timeout_s" \
             ${shell}/bin/shell_app \
-            --assets=${demoAssets} \
-            --icu=${demoAssets}/icudtl.dat \
+            --assets=${galleryAssets} \
+            --icu=${galleryAssets}/icudtl.dat \
             --renderer=gl "$@"
         '';
       in {
         flutter-engine = flutter-engine;
         default = flutter-engine;
         inherit shell shell-wayland-software shell-drm shell-drm-software;
-        inherit channel-demo demoAssets;
+        inherit gallery galleryAssets;
       };
     }) supportedSystems);
 
     apps = builtins.listToAttrs (map (system: {
       name = system;
       value = {
-        channel-demo = {
+        gallery = {
           type = "app";
-          program = "${self.packages.${system}.channel-demo}/bin/channel-demo";
+          program = "${self.packages.${system}.gallery}/bin/gallery";
         };
       };
     }) supportedSystems);

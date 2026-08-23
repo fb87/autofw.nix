@@ -15,10 +15,15 @@ namespace shell::channel
 {
 
 // A named platform-message handler. It receives a decoded StandardMethodCodec
-// method call and returns the response payload (or an error result for which an
-// empty ack is sent).
-using handler =
-    std::function<result<std::vector<std::uint8_t>>(const std::string& method)>;
+// method call (method name plus the raw encoded argument value) and returns the
+// response payload (or an error result for which an empty ack is sent).
+//
+// |args| is the StandardMessageCodec-encoded single argument (empty when the
+// call carries none). Decode it with codec::decode_int64 / decode_string /
+// decode_byte_array.
+using handler = std::function<
+    result<std::vector<std::uint8_t>>(const std::string& method,
+                                      std::span<const std::uint8_t> args)>;
 
 // Registry mapping channel names to method handlers.
 struct state
@@ -65,9 +70,10 @@ inline auto dispatch(state& s, const char* channel,
         return {};
     }
     std::string method;
-    if (!codec::decode_method_call(message, method))
+    std::span<const std::uint8_t> args;
+    if (!codec::decode_method_call_args(message, method, args))
         return {};
-    auto res = it->second(method);
+    auto res = it->second(method, args);
     if (!res)
         return {};
     return *res;

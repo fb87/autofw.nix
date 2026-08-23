@@ -32,6 +32,34 @@ bool clear_current(void*)
 
 bool present(void* d)
 {
+    static int present_count = 0;
+    static int frames_dumped = 0;
+    int pc = ++present_count;
+    bool dump_now = frames_dumped < 14 && (pc <= 2 || (pc % 90) <= 2);
+    if (dump_now)
+    {
+        GLint vp[4] = {0,0,0,0};
+        glGetIntegerv(GL_VIEWPORT, vp);
+        GLsizei w = vp[2], h = vp[3];
+        if (w > 0 && h > 0)
+        {
+            std::vector<std::uint8_t> px(size_t(w)*size_t(h)*4);
+            glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+            char path[80]; std::snprintf(path, sizeof path, "/tmp/gl_%d.ppm", frames_dumped++);
+            std::FILE* fp = std::fopen(path, "w");
+            if (fp)
+            {
+                std::fprintf(fp, "P6\n%d %d\n255\n", w, h);
+                for (GLsizei y = 0; y < h; ++y)
+                {
+                    const auto* row = px.data() + size_t(h-1-y)*size_t(w)*4;
+                    for (GLsizei x = 0; x < w; ++x)
+                    { std::fputc(row[x*4+0], fp); std::fputc(row[x*4+1], fp); std::fputc(row[x*4+2], fp); }
+                }
+                std::fclose(fp);
+            }
+        }
+    }
     return static_cast<state*>(d)->out->present(static_cast<state*>(d)->out->state);
 }
 
@@ -167,6 +195,14 @@ inline auto stop_runner(state& s) -> void
         s.runner_thread.join();
 }
 
+// Forward declarations (defined below) so the gallery channels in init() can
+// drive external textures.
+inline auto register_texture(state& s, texture::id id) -> result<void>;
+inline auto unregister_texture(state& s, texture::id id) -> result<void>;
+inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,
+                               std::uint32_t h,
+                               std::span<const std::uint8_t> rgba) -> bool;
+
 inline auto init(state& s) -> result<void>
 {
     // Renderer selection is independent of the display backend: accelerated
@@ -256,16 +292,109 @@ inline auto init(state& s) -> result<void>
             error{.code = error_code::flutter, .message = "run failed"});
     }
 
-    // Demo platform channel: 'shell/demo' echoes a canned reply so a Dart app
-    // can verify the two-way message bridge.
+    // Gallery channels.
+    //
+    // 'shell/demo'  — canned replies for the echo and ping round-trips.
+    // 'shell/calc'  — decodes [a, b] int args and returns add/mul results,
+    //                 demonstrating argument passing through the codec.
+    // 'shell/texture' — external-texture lifecycle: register/unregister ids and
+    //                 push CPU RGBA frames the engine uploads to a GL texture
+    //                 that Flutter composites (GL builds only).
     channel::register_channel(
         s.channels, "shell/demo",
-        [](const std::string& method) -> result<std::vector<std::uint8_t>>
+        [](const std::string& method, std::span<const std::uint8_t>)
+            -> result<std::vector<std::uint8_t>>
         {
-            if (method == "echo" ) return codec::encode_string("pong");
+            if (method == "echo") return codec::encode_string("pong");
             if (method == "ping") return codec::encode_string("pong");
             return std::unexpected(
                 error{.code = error_code::plugin, .message = "unknown demo method"});
+        });
+
+    channel::register_channel(
+        s.channels, "shell/calc",
+        [](const std::string& method, std::span<const std::uint8_t> args)
+            -> result<std::vector<std::uint8_t>>
+        {
+            std::int64_t a = 0, b = 0;
+            int idx = 0;
+            bool ok = codec::foreach_list_item(
+                args, [&](std::span<const std::uint8_t> item)
+                {
+                    std::int64_t v = 0;
+                    if (codec::decode_int64(item, v))
+                    {
+                        if (idx == 0) a = v;
+                        else if (idx == 1) b = v;
+                        ++idx;
+                    }
+                });
+            if (!ok || idx < 2)
+                return std::unexpected(error{.code = error_code::plugin,
+                                             .message = "calc: need [a, b]"});
+            if (method == "add") return codec::encode_int64(a + b);
+            if (method == "mul") return codec::encode_int64(a * b);
+            return std::unexpected(
+                error{.code = error_code::plugin, .message = "calc: unknown method"});
+        });
+
+    channel::register_channel(
+        s.channels, "shell/texture",
+        [&s](const std::string& method, std::span<const std::uint8_t> args)
+            -> result<std::vector<std::uint8_t>>
+        {
+            std::int64_t id = 0;
+            if (method == "register")
+            {
+                if (!codec::decode_int64(args, id))
+                    return std::unexpected(error{.code = error_code::plugin,
+                                                 .message = "texture: register needs id"});
+                auto r = register_texture(s, static_cast<texture::id>(id));
+                if (!r)
+                    return std::unexpected(r.error());
+                return codec::encode_bool(true);
+            }
+            if (method == "unregister")
+            {
+                if (codec::decode_int64(args, id))
+                    unregister_texture(s, static_cast<texture::id>(id));
+                return codec::encode_bool(true);
+            }
+            if (method == "pushFrame")
+            {
+                // args: list [id, width, height, rgbaByteArray]
+                std::int64_t w = 0, h = 0;
+                std::span<const std::uint8_t> rgba;
+                int idx = 0;
+                codec::foreach_list_item(
+                    args, [&](std::span<const std::uint8_t> item)
+                    {
+                        std::int64_t v = 0;
+                        if (codec::decode_int64(item, v))
+                        {
+                            if (idx == 0) id = v;
+                            else if (idx == 1) w = v;
+                            else if (idx == 2) h = v;
+                            ++idx;
+                        }
+                        else if (codec::decode_byte_array(item, rgba))
+                        {
+                            ++idx;
+                        }
+                    });
+                if (idx < 4 || w <= 0 || h <= 0 || rgba.size() < 4)
+                    return std::unexpected(error{.code = error_code::plugin,
+                                                 .message = "texture: bad pushFrame args"});
+                bool ok = push_texture_frame(s, static_cast<texture::id>(id),
+                                             static_cast<std::uint32_t>(w),
+                                             static_cast<std::uint32_t>(h), rgba);
+                if (!ok)
+                    return std::unexpected(error{.code = error_code::texture,
+                                                 .message = "texture: push failed (GL only)"});
+                return codec::encode_bool(true);
+            }
+            return std::unexpected(
+                error{.code = error_code::plugin, .message = "texture: unknown method"});
         });
 
     FlutterEngineDisplay display = {};
@@ -433,7 +562,10 @@ inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,
     }
     if (!ok)
         return false;
-    return FlutterEngineMarkExternalTextureFrameAvailable(s.fl, id) == kSuccess;
+    bool marked = FlutterEngineMarkExternalTextureFrameAvailable(s.fl, id) == kSuccess;
+    static int marks=0;
+    if (marks++ < 4) std::fprintf(stderr, "[tex] push_texture_frame id=%ld w=%u h=%u upload_ok=%d marked=%d\n", (long)id, w, h, ok, marked);
+    return marked;
 #else
     // Software mode has no GL upload context; GL-backed external textures are
     // unsupported and must fail capability negotiation cleanly.
@@ -453,10 +585,7 @@ bool external_texture_frame(void* d, std::int64_t id, std::size_t, std::size_t,
     auto* s = static_cast<state*>(d);
     texture::gl t{};
     if (!texture::get_texture(s->textures, id, t))
-    {
-        texture::ensure_texture(s->textures, id, 1, 1);
-        texture::get_texture(s->textures, id, t);
-    }
+        return false; // no uploaded frame yet; Flutter retries on next tick.
     out->target = GL_TEXTURE_2D;
     out->name = t.name;
     out->format = 0x8058;
@@ -464,6 +593,8 @@ bool external_texture_frame(void* d, std::int64_t id, std::size_t, std::size_t,
     out->height = t.height;
     out->user_data = nullptr;
     out->destruction_callback = nullptr;
+    static int etf=0;
+    if (etf++ < 4) std::fprintf(stderr, "[tex] external_texture_frame id=%ld name=%u w=%u h=%u\n", (long)id, t.name, t.width, t.height);
     return true;
 }
 #else
@@ -479,12 +610,17 @@ void on_platform_message(const FlutterPlatformMessage* m, void* d)
     auto* e = static_cast<state*>(d);
     if (m == nullptr || e->fl == nullptr)
         return;
-    // Route named platform-message channels through the channel registry.
-    std::vector<std::uint8_t> payload = channel::dispatch(
+    // Route named platform-message channels through the channel registry. The
+    // returned payload is an encoded value; wrap it in a success envelope so the
+    // Dart StandardMethodCodec.decodeEnvelope can read it.
+    std::vector<std::uint8_t> value = channel::dispatch(
         e->channels, m->channel, std::span(m->message, m->message_size));
+    std::vector<std::uint8_t> response;
+    if (!value.empty())
+        response = codec::success_envelope(value);
     FlutterEngineSendPlatformMessageResponse(e->fl, m->response_handle,
-                                             payload.empty() ? nullptr : payload.data(),
-                                             payload.size());
+                                             response.empty() ? nullptr : response.data(),
+                                             response.size());
 }
 } // namespace detail
 

@@ -1,0 +1,9 @@
+name: shell_gallery
+description: "A gallery of shell:: components driven from Flutter: custom method channels, external textures, and platform bridges."
+version: 0.1.0
+publish_to: none
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+dependencies:
+  flutter:
+    sdk: flutter
