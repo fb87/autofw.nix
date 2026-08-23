@@ -63,7 +63,7 @@
           pkgs.stdenv.mkDerivation {
             pname = "shell-${backend}-${renderer}";
             version = "0.1.0";
-            src = ./shell;
+            src = ./.;
             nativeBuildInputs = [ pkgs.cmake pkgs.pkg-config pkgs.ninja ];
             buildInputs = [
               pkgs.libGL.dev

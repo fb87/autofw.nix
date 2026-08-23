@@ -43,11 +43,11 @@ channels register a method handler; the engine routes each inbound
 - A demo channel `shell/demo` echoes a canned reply so a Dart app can verify the
   two-way bridge.
 
-Flutter-side: `shell/flutter/` holds the framework widgets; a runnable example
-lives in `shell/examples/channel_demo/` (custom MethodChannel + path_provider).
+Flutter-side: `flutter/` holds the framework widgets; a runnable example
+lives in `examples/channel_demo/` (custom MethodChannel + path_provider).
 
 ```sh
 # build the Flutter demo assets, then run
-(cd shell/examples/channel_demo && flutter build bundle --target-platform linux-x64)
-./result-shell/bin/shell_app --assets=shell/examples/channel_demo/build/flutter_assets ...
+(cd examples/channel_demo && flutter build bundle --target-platform linux-x64)
+./result-shell/bin/shell_app --assets=examples/channel_demo/build/flutter_assets ...
 ```
