@@ -273,7 +273,10 @@ inline void p_enter(void* d, wl_pointer*, std::uint32_t, wl_surface* sx, wl_fixe
     if (s->cb.on_pointer)
     {
         s->cb.on_pointer(input::pointer_event{
-            .phase = input::pointer_phase::add, .x = s->pointer_x, .y = s->pointer_y});
+            .phase = input::pointer_phase::add,
+            .x = s->pointer_x,
+            .y = s->pointer_y,
+            .buttons = s->buttons});
     }
 }
 inline void p_leave(void* d, wl_pointer*, std::uint32_t, wl_surface*)
@@ -297,7 +300,8 @@ inline void p_motion(void* d, wl_pointer*, std::uint32_t, wl_fixed_t px, wl_fixe
             input::pointer_event{.phase = s->buttons ? input::pointer_phase::move
                                                      : input::pointer_phase::hover,
                                  .x = s->pointer_x,
-                                 .y = s->pointer_y});
+                                 .y = s->pointer_y,
+                                 .buttons = s->buttons});
     }
 }
 inline void p_button(void* d, wl_pointer*, std::uint32_t, std::uint32_t,
@@ -324,7 +328,8 @@ inline void p_button(void* d, wl_pointer*, std::uint32_t, std::uint32_t,
                          ? input::pointer_phase::down
                          : input::pointer_phase::up,
             .x = s->pointer_x,
-            .y = s->pointer_y});
+            .y = s->pointer_y,
+            .buttons = s->buttons});
     }
 }
 inline void p_axis(void* d, wl_pointer*, std::uint32_t, std::uint32_t, wl_fixed_t)
@@ -333,7 +338,10 @@ inline void p_axis(void* d, wl_pointer*, std::uint32_t, std::uint32_t, wl_fixed_
     if (s->cb.on_pointer)
     {
         s->cb.on_pointer(input::pointer_event{
-            .phase = input::pointer_phase::up, .x = s->pointer_x, .y = s->pointer_y});
+            .phase = input::pointer_phase::up,
+            .x = s->pointer_x,
+            .y = s->pointer_y,
+            .buttons = s->buttons});
     }
 }
 inline void k_keymap(void* d, wl_keyboard*, std::uint32_t, std::int32_t fd,

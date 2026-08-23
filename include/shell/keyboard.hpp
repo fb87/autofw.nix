@@ -94,17 +94,23 @@ inline auto keysym_to_logical(std::uint32_t sym) -> std::uint64_t
     case XKB_KEY_Delete:
         return 0x0010000007F;
     case XKB_KEY_Left:
-        return 0x00100000050;
+        return 0x00100000302; // LogicalKeyboardKey.arrowLeft
     case XKB_KEY_Up:
-        return 0x00100000052;
+        return 0x00100000304; // arrowUp
     case XKB_KEY_Right:
-        return 0x0010000004F;
+        return 0x00100000303; // arrowRight
     case XKB_KEY_Down:
-        return 0x00100000051;
+        return 0x00100000301; // arrowDown
     case XKB_KEY_Home:
-        return 0x00100000050;
+        return 0x00100000306; // home
     case XKB_KEY_End:
-        return 0x00100000047;
+        return 0x00100000305; // end
+    case XKB_KEY_Page_Up:
+        return 0x00100000308; // pageUp
+    case XKB_KEY_Page_Down:
+        return 0x00100000307; // pageDown
+    case XKB_KEY_Insert:
+        return 0x00100000407; // insert
     default:
         return 0x00100000000 | (sym & 0xFFFF);
     }
@@ -374,17 +380,23 @@ inline auto keysym_to_logical(std::uint32_t sym) -> std::uint64_t
     case XKB_KEY_Delete:
         return 0x0010000007F;
     case XKB_KEY_Left:
-        return 0x00100000050;
+        return 0x00100000302; // LogicalKeyboardKey.arrowLeft
     case XKB_KEY_Up:
-        return 0x00100000052;
+        return 0x00100000304; // arrowUp
     case XKB_KEY_Right:
-        return 0x0010000004F;
+        return 0x00100000303; // arrowRight
     case XKB_KEY_Down:
-        return 0x00100000051;
+        return 0x00100000301; // arrowDown
     case XKB_KEY_Home:
-        return 0x00100000050;
+        return 0x00100000306; // home
     case XKB_KEY_End:
-        return 0x00100000047;
+        return 0x00100000305; // end
+    case XKB_KEY_Page_Up:
+        return 0x00100000308; // pageUp
+    case XKB_KEY_Page_Down:
+        return 0x00100000307; // pageDown
+    case XKB_KEY_Insert:
+        return 0x00100000407; // insert
     default:
         return 0x00100000000 | (sym & 0xFFFF);
     }

@@ -39,6 +39,7 @@ class _FormPanelState extends State<FormPanel> {
           children: [
             TextField(
               controller: _controller,
+              autofocus: true,
               decoration: const InputDecoration(
                 labelText: 'Basic text field',
                 hintText: 'Type something…',

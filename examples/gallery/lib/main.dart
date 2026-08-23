@@ -76,7 +76,7 @@ class GalleryHome extends StatefulWidget {
 }
 
 class _GalleryHomeState extends State<GalleryHome> {
-  int _index = 7; // start on the External-texture tab (flagship component)
+  int _index = 0; // start on Form & inputs (showcases typed text input)
 
   @override
   Widget build(BuildContext context) {

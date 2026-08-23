@@ -34,6 +34,10 @@ struct pointer_event
     double y{};
     std::uint64_t timestamp{};
     device_type kind{device_type::pointer};
+    // Modifier/button mask at the time of the event: 0x1 primary (left),
+    // 0x2 secondary (right), 0x4 middle. Matches Flutter's button constants so
+    // a pressed mouse button is reported even on kMove/kUp.
+    std::uint32_t buttons{};
 };
 
 // A normalized input source. It owns a file descriptor (Wayland, libinput,

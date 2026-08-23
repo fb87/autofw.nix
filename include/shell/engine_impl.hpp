@@ -1,6 +1,7 @@
 // engine_impl.hpp -- implementation of the shell Flutter engine wrapper.
 // Included at the bottom of engine.hpp; must not include engine.hpp back.
 
+#include <cstdio>
 #include <functional>
 #include <span>
 
@@ -419,7 +420,7 @@ inline void send_pointer(state& s, const input::pointer_event& ev)
     pt.timestamp = FlutterEngineGetCurrentTime();
     pt.x = ev.x;
     pt.y = ev.y;
-    pt.device = 0;
+    pt.device = ev.device;
     pt.device_kind = kFlutterPointerDeviceKindMouse;
     pt.signal_kind = kFlutterPointerSignalKindNone;
     pt.view_id = 0;
@@ -444,7 +445,8 @@ inline void send_pointer(state& s, const input::pointer_event& ev)
         pt.phase = kHover;
         break;
     }
-    pt.buttons = s.last_buttons;
+    pt.buttons = ev.buttons;
+    s.last_buttons = ev.buttons;
     FlutterEngineSendPointerEvent(s.fl, &pt, 1);
 }
 
@@ -453,7 +455,8 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
     keyboard::ensure_default_keymap(s.kb);
     keyboard::key_result r = keyboard::translate(s.kb, evdev_code, down);
     auto captured = std::make_shared<keyboard::key_result>(r);
-    auto deliver = [&s, captured, down]
+    std::uint32_t ev = evdev_code;
+    auto deliver = [&s, captured, down, ev]
     {
         FlutterKeyEvent key = {};
         key.struct_size = sizeof(key);
@@ -467,6 +470,58 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
         key.synthesized = false;
         key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
         FlutterEngineSendKeyEvent(s.fl, &key, nullptr, nullptr);
+
+        // Drive host-side IME: mirror what a hardware key typed into a focused
+        // TextField. Only act on a key-down press of editing/editing keys.
+        if (s.ti.connected && down)
+        {
+            if (ev == 14 /* KEY_BACKSPACE */)
+            {
+                textinput::backspace(s.ti);
+            }
+            else if (ev == 111 /* KEY_DELETE */)
+            {
+                textinput::forward_delete(s.ti);
+            }
+            else if (!captured->character.empty() &&
+                     captured->character[0] < 0x20)
+            {
+                // Control characters (Enter -> '\r', Tab -> '\t', etc.) must
+                // not be spliced literally into the editing text; a single-line
+                // TextField's Enter performs an action instead.
+                textinput::request_action(s.ti);
+            }
+            else if (!captured->character.empty())
+            {
+                // A single key typically yields one character; use it directly.
+                textinput::insert_characters(s.ti, captured->character);
+            }
+        }
+        // Push the host->framework IME update: either the edited text, or --
+        // for a single-line field's Enter/Tab -- a performAction request.
+        const std::string kChan = "flutter/textinput";
+        auto send_pm = [&](const std::string& json)
+        {
+            if (json.empty())
+                return;
+            FlutterPlatformMessage msg = {};
+            msg.struct_size = sizeof(msg);
+            msg.channel = kChan.c_str();
+            msg.message = reinterpret_cast<const std::uint8_t*>(json.data());
+            msg.message_size = json.size();
+            FlutterEngineSendPlatformMessage(s.fl, &msg);
+        };
+        if (s.ti.action_pending && s.ti.connected)
+        {
+            send_pm(textinput::perform_action_json(s.ti));
+            s.ti.action_pending = false;
+        }
+        if (s.ti.dirty && s.ti.connected)
+        {
+            std::string json2 = textinput::update_editing_state(s.ti);
+            send_pm(json2);
+            s.ti.dirty = false;
+        }
     };
     std::lock_guard lock(s.runner_mutex);
     s.runner_q.push_back(deliver);
@@ -577,6 +632,19 @@ void on_platform_message(const FlutterPlatformMessage* m, void* d)
     auto* e = static_cast<state*>(d);
     if (m == nullptr || e->fl == nullptr)
         return;
+    if (std::string_view(m->channel).find("textinput") != std::string_view::npos)
+    {
+        // Flutter drives the IME over the JSON-method-coded `flutter/textinput`
+        // channel. Parse it and ACK (or update editing state) so a focused
+        // TextField actually accepts typed characters.
+        std::string payload(reinterpret_cast<const char*>(m->message), m->message_size);
+        auto resp = textinput::handle(e->ti, payload);
+        // We must always answer (even a bare ACK keeps the connection alive).
+        if (resp.empty())
+            resp = textinput::ack();
+        FlutterEngineSendPlatformMessageResponse(e->fl, m->response_handle, resp.data(), resp.size());
+        return;
+    }
     // Route named platform-message channels through the channel registry. The
     // returned payload is an encoded value; wrap it in a success envelope so the
     // Dart StandardMethodCodec.decodeEnvelope can read it.

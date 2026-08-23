@@ -28,6 +28,7 @@
 #include <shell/renderer.hpp>
 #include <shell/result.hpp>
 #include <shell/texture.hpp>
+#include <shell/textinput.hpp>
 
 namespace shell::engine
 {
@@ -59,6 +60,7 @@ struct state
     texture::state textures;
     keyboard::state kb;
     channel::state channels;
+    textinput::state ti;
 
     std::mutex runner_mutex;
     std::condition_variable runner_cv;
