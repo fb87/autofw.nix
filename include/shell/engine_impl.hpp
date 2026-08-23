@@ -471,34 +471,56 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
         key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
         FlutterEngineSendKeyEvent(s.fl, &key, nullptr, nullptr);
 
-        // Drive host-side IME: mirror what a hardware key typed into a focused
-        // TextField. Only act on a key-down press of editing/editing keys.
-        if (s.ti.connected && down)
+        // Drive host-side IME under the state lock: mirror a hardware key into
+        // a focused TextField, and build the host->framework JSON payloads.
+        // The payloads are sent after the lock is released to avoid any
+        // re-entrancy with FlutterEngineSendPlatformMessage.
+        std::string update_json, action_json;
         {
-            if (ev == 14 /* KEY_BACKSPACE */)
+            std::lock_guard lock(s.ti.mutex);
+            if (s.ti.connected && down)
             {
-                textinput::backspace(s.ti);
+                if (ev == 14 /* KEY_BACKSPACE */)
+                {
+                    textinput::backspace(s.ti);
+                }
+                else if (ev == 111 /* KEY_DELETE */)
+                {
+                    textinput::forward_delete(s.ti);
+                }
+                else if (!captured->character.empty() &&
+                         captured->character[0] < 0x20)
+                {
+                    // Control character (Enter -> '\r', Tab -> '\t'): don't
+                    // splice it literally. A multi-line field turns Enter into
+                    // a hard newline; otherwise the field performs its action.
+                    if (ev == 28 /* KEY_ENTER */ && s.ti.multiline)
+                    {
+                        textinput::insert_characters(s.ti, "\n");
+                    }
+                    else
+                    {
+                        textinput::request_action(s.ti);
+                    }
+                }
+                else if (!captured->character.empty())
+                {
+                    // A single key typically yields one character; insert it.
+                    textinput::insert_characters(s.ti, captured->character);
+                }
             }
-            else if (ev == 111 /* KEY_DELETE */)
+            if (s.ti.action_pending && s.ti.connected)
             {
-                textinput::forward_delete(s.ti);
+                action_json = textinput::perform_action_json(s.ti);
+                s.ti.action_pending = false;
             }
-            else if (!captured->character.empty() &&
-                     captured->character[0] < 0x20)
+            if (s.ti.dirty && s.ti.connected)
             {
-                // Control characters (Enter -> '\r', Tab -> '\t', etc.) must
-                // not be spliced literally into the editing text; a single-line
-                // TextField's Enter performs an action instead.
-                textinput::request_action(s.ti);
-            }
-            else if (!captured->character.empty())
-            {
-                // A single key typically yields one character; use it directly.
-                textinput::insert_characters(s.ti, captured->character);
+                update_json = textinput::update_editing_state(s.ti);
+                s.ti.dirty = false;
             }
         }
-        // Push the host->framework IME update: either the edited text, or --
-        // for a single-line field's Enter/Tab -- a performAction request.
+        // Push host->framework IME updates (after releasing the lock).
         const std::string kChan = "flutter/textinput";
         auto send_pm = [&](const std::string& json)
         {
@@ -511,17 +533,8 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
             msg.message_size = json.size();
             FlutterEngineSendPlatformMessage(s.fl, &msg);
         };
-        if (s.ti.action_pending && s.ti.connected)
-        {
-            send_pm(textinput::perform_action_json(s.ti));
-            s.ti.action_pending = false;
-        }
-        if (s.ti.dirty && s.ti.connected)
-        {
-            std::string json2 = textinput::update_editing_state(s.ti);
-            send_pm(json2);
-            s.ti.dirty = false;
-        }
+        send_pm(action_json);
+        send_pm(update_json);
     };
     std::lock_guard lock(s.runner_mutex);
     s.runner_q.push_back(deliver);
@@ -638,7 +651,11 @@ void on_platform_message(const FlutterPlatformMessage* m, void* d)
         // channel. Parse it and ACK (or update editing state) so a focused
         // TextField actually accepts typed characters.
         std::string payload(reinterpret_cast<const char*>(m->message), m->message_size);
-        auto resp = textinput::handle(e->ti, payload);
+        std::vector<std::uint8_t> resp;
+        {
+            std::lock_guard lock(e->ti.mutex);
+            resp = textinput::handle(e->ti, payload);
+        }
         // We must always answer (even a bare ACK keeps the connection alive).
         if (resp.empty())
             resp = textinput::ack();

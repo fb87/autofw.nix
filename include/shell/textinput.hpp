@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -282,16 +283,24 @@ struct state
     std::string text;
     std::int64_t selection_base{-1};
     std::int64_t selection_extent{-1};
-    std::int64_t composing_base{-1};
+    std::int64_t composing_base{-1};   // -1 == no active composing run
     std::int64_t composing_extent{-1};
     bool connected{};
+    // Client configuration (from TextInput.setClient args[1]).
+    bool multiline{};                  // inputType == TextInputType.multiline
+    bool obscured{};                   // inputType == TextInputType.password
+    std::string keyboard_type{"text"};
+    std::string text_input_action{"done"};
     // True when we pushed an updateEditingState that Flutter hasn't answered
     // with TextInput.setEditingState (so we don't fight Flutter's own state).
     bool dirty{};
-    // Action requested by the last control key (e.g. Enter) for a single-line
-    // field; the engine performs it with TextInputClient.performAction.
+    // Action requested by the last control key (Enter) for a single-line field;
+    // the engine performs it with TextInputClient.performAction.
     bool action_pending{};
-    std::string text_input_action{"done"};
+    // Guards all editing state; the engine must hold it while calling into the
+    // editing helpers (on_platform_message and send_key run on different
+    // threads).
+    std::mutex mutex;
 };
 
 // ACK response for a handled JSON method call. JSONMethodCodec.decodeEnvelope
@@ -303,7 +312,7 @@ inline auto ack() -> std::vector<std::uint8_t>
     return {n, n + 6};
 }
 
-// Build the JSON payload for TextInput.updateEditingState.
+// Build the JSON payload for TextInputClient.updateEditingState.
 inline auto update_editing_state(const state& s) -> std::string
 {
     if (s.client < 0)
@@ -314,11 +323,20 @@ inline auto update_editing_state(const state& s) -> std::string
     j += ",{\"text\":";
     j += quote(s.text);
     std::int64_t sel = s.selection_base < 0 ? (std::int64_t)s.text.size() : s.selection_base;
+    std::int64_t ext = s.selection_extent < 0 ? sel : s.selection_extent;
     j += ",\"selectionBase\":" + std::to_string(sel);
-    j += ",\"selectionExtent\":" + std::to_string(sel);
+    j += ",\"selectionExtent\":" + std::to_string(ext);
     j += ",\"selectionAffinity\":\"TextAffinity.downstream\"";
     j += ",\"selectionIsDirectional\":false";
-    j += ",\"composingBase\":-1,\"composingExtent\":-1";
+    if (s.composing_base >= 0 && s.composing_extent >= s.composing_base)
+    {
+        j += ",\"composingBase\":" + std::to_string(s.composing_base);
+        j += ",\"composingExtent\":" + std::to_string(s.composing_extent);
+    }
+    else
+    {
+        j += ",\"composingBase\":-1,\"composingExtent\":-1";
+    }
     j += "}]}";
     return j;
 }
@@ -343,12 +361,38 @@ inline auto handle(state& s, std::string_view json) -> std::vector<std::uint8_t>
         {
             s.client = static_cast<std::int64_t>(args->at(0)->num);
             s.connected = true;
-            // Remember the textInputAction (defaults to "done"): it is needed
-            // to answer an Enter/control key with TextInputClient.performAction.
             const value* cfg = args->at(1);
             const value* act = cfg ? cfg->get("inputAction") : nullptr;
             if (act && act->k == kind::string_ && !act->str.empty())
                 s.text_input_action = act->str;
+            // Determine single/multi-line and ObscuringText/read-only from the
+            // inputType map (or the literal keyboardType string on some hosts).
+            s.multiline = false;
+            s.obscured = false;
+            if (cfg)
+            {
+                const value* ty = cfg->get("inputType");
+                if (ty && ty->k == kind::object)
+                {
+                    const value* kt = ty->get("name");
+                    if (kt && kt->k == kind::string_)
+                        s.keyboard_type = kt->str;
+                    if (kt && kt->k == kind::string_)
+                    {
+                        s.multiline = (kt->str == "TextInputType.multiline");
+                        s.obscured = (kt->str == "TextInputType.password");
+                    }
+                }
+                else if (ty && ty->k == kind::string_)
+                {
+                    s.keyboard_type = ty->str;
+                    s.multiline = (ty->str == "TextInputType.multiline");
+                    s.obscured = (ty->str == "TextInputType.password");
+                }
+                const value* ob = cfg->get("obscureText");
+                if (ob && ob->k == kind::boolean)
+                    s.obscured = ob->b;
+            }
         }
     }
     else if (m == "TextInput.setEditingState")
@@ -360,10 +404,16 @@ inline auto handle(state& s, std::string_view json) -> std::vector<std::uint8_t>
                 s.text = t->str;
             const value* b = args->get("selectionBase");
             const value* e = args->get("selectionExtent");
+            const value* cb = args->get("composingBase");
+            const value* ce = args->get("composingExtent");
             if (b && b->k == kind::number)
                 s.selection_base = static_cast<std::int64_t>(b->num);
             if (e && e->k == kind::number)
                 s.selection_extent = static_cast<std::int64_t>(e->num);
+            if (cb && cb->k == kind::number)
+                s.composing_base = static_cast<std::int64_t>(cb->num);
+            if (ce && ce->k == kind::number)
+                s.composing_extent = static_cast<std::int64_t>(ce->num);
         }
     }
     else if (m == "TextInput.clearClient" || m == "TextInput.closeConnection")
@@ -372,6 +422,8 @@ inline auto handle(state& s, std::string_view json) -> std::vector<std::uint8_t>
         s.connected = false;
         s.text.clear();
         s.selection_base = s.selection_extent = 0;
+        s.composing_base = s.composing_extent = -1;
+        s.action_pending = false;
     }
     // show / hide / others: ack only.
     s.dirty = false;
