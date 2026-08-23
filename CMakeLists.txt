@@ -96,15 +96,15 @@ target_link_libraries(shell_app PRIVATE shell_impl ${CMAKE_DL_LIBS} pthread)
 # ---------------------------------------------------------------------------
 # Examples & tests
 # ---------------------------------------------------------------------------
-option(FLSHELL_BUILD_EXAMPLES "Build shell examples" ON)
-option(FLSHELL_BUILD_TESTS "Build shell tests" ON)
+option(SHELL_BUILD_EXAMPLES "Build shell examples" ON)
+option(SHELL_BUILD_TESTS "Build shell tests" ON)
 
-if(FLSHELL_BUILD_EXAMPLES)
+if(SHELL_BUILD_EXAMPLES)
   add_executable(shell_minimal examples/minimal/main.cpp)
   target_link_libraries(shell_minimal PRIVATE shell_impl)
 endif()
 
-if(FLSHELL_BUILD_TESTS)
+if(SHELL_BUILD_TESTS)
   enable_testing()
   add_executable(shell_headers_test tests/headers/main.cpp)
   target_link_libraries(shell_headers_test PRIVATE shell_impl)
