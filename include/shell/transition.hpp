@@ -193,6 +193,36 @@ inline auto cancel(state& s, id tid) -> result<void>
     return {};
 }
 
+// Deterministically advance a transition by an explicit elapsed time (ms), so
+// callers do not depend on the wall clock. Returns false when it is done.
+inline auto update(state& s, id tid, std::int64_t elapsed_ms) -> bool
+{
+    auto it = s.map.find(tid);
+    if (it == s.map.end())
+        return false;
+    active& a = it->second;
+    if (a.phase == status::cancelled || a.phase == status::interrupted ||
+        a.phase == status::completed)
+        return false;
+    a.phase = status::running;
+    auto total = a.req.animation.duration.count();
+    if (total <= 0)
+    {
+        a.progress = 1.0F;
+        a.phase = status::completed;
+        return false;
+    }
+    float raw = static_cast<float>(elapsed_ms) / static_cast<float>(total);
+    if (raw >= 1.0F)
+    {
+        a.progress = 1.0F;
+        a.phase = status::completed;
+        return false;
+    }
+    a.progress = ease(a, raw);
+    return true;
+}
+
 inline auto remove(state& s, id tid) -> bool
 {
     return s.map.erase(tid) > 0;
