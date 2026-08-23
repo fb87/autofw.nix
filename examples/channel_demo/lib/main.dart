@@ -1,14 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:path_provider/path_provider.dart';
 
-/// Demonstrates the shell::channel platform-message bridge:
-///  - a custom MethodChannel (`shell/demo`) handled by the shell
-///  - the standard path_provider channel (get_storage documents path)
+/// Demonstrates the shell::channel platform-message bridge from Flutter via a
+/// custom MethodChannel (`shell/demo`) handled by the embedder.
 void main() => runApp(const ChannelDemoApp());
 
 class ChannelDemoApp extends StatelessWidget {
   const ChannelDemoApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     return const MaterialApp(
@@ -19,6 +18,7 @@ class ChannelDemoApp extends StatelessWidget {
 
 class ChannelPanel extends StatefulWidget {
   const ChannelPanel({super.key});
+
   @override
   State<ChannelPanel> createState() => _ChannelPanelState();
 }
@@ -26,7 +26,7 @@ class ChannelPanel extends StatefulWidget {
 class _ChannelPanelState extends State<ChannelPanel> {
   static const MethodChannel _channel = MethodChannel('shell/demo');
   String? _echo;
-  String? _docs;
+  String? _pong;
 
   Future<void> _callEcho() async {
     try {
@@ -37,12 +37,12 @@ class _ChannelPanelState extends State<ChannelPanel> {
     }
   }
 
-  Future<void> _callPathProvider() async {
+  Future<void> _callPing() async {
     try {
-      final dir = await getApplicationDocumentsDirectory();
-      setState(() => _docs = dir.path);
+      final result = await _channel.invokeMethod<String>('ping');
+      setState(() => _pong = result);
     } on PlatformException catch (e) {
-      setState(() => _docs = 'error: ${e.message}');
+      setState(() => _pong = 'error: ${e.message}');
     }
   }
 
@@ -54,13 +54,11 @@ class _ChannelPanelState extends State<ChannelPanel> {
         children: [
           const Text('shell::channel demo', style: TextStyle(fontSize: 24)),
           const SizedBox(height: 24),
-          FilledButton(onPressed: _callEcho, child: const Text('Call shell/demo')),
+          FilledButton(onPressed: _callEcho, child: const Text('Call shell/demo echo')),
           if (_echo != null) Text('echo -> $_echo'),
           const SizedBox(height: 24),
-          FilledButton(
-              onPressed: _callPathProvider,
-              child: const Text('Query path_provider')),
-          if (_docs != null) Text('docs -> $_docs'),
+          FilledButton(onPressed: _callPing, child: const Text('Call shell/demo ping')),
+          if (_pong != null) Text('ping -> $_pong'),
         ],
       ),
     );

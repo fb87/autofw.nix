@@ -50,4 +50,11 @@ lives in `examples/channel_demo/` (custom MethodChannel + path_provider).
 # build the Flutter demo assets, then run
 (cd examples/channel_demo && flutter build bundle --target-platform linux-x64)
 ./result-shell/bin/shell_app --assets=examples/channel_demo/build/flutter_assets ...
+
+## Run the demo with nix run
+
+```sh
+nix run .#channel-demo
+```
+
 ```

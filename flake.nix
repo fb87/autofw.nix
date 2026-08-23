@@ -6,7 +6,7 @@
     nixpkgs.url = "github:nixos/nixpkgs?ref=nixos-26.05-small";
   };
 
-  outputs = inputs: let
+  outputs = { self, ... } @ inputs: let
     supportedSystems = [ "x86_64-linux" "aarch64-linux" ];
   in {
     # Lay out outputs explicitly per supported system.
@@ -32,6 +32,9 @@
             "sha256-dEq0/MnXvxV+n2b9e2tL/7nEGTjJwO2/Wlw2Wz9mm+w="
           else
             throw "Unsupported system '${system}' for the Flutter embedder";
+
+        # Seconds after which `nix run .#channel-demo` stops the demo app.
+        demoTimeout = 60;
 
         flutter-engine = pkgs.stdenvNoCC.mkDerivation {
           pname = "flutter-embedder";
@@ -87,10 +90,44 @@
         shell-wayland-software = shellFor "wayland" "software";
         shell-drm = shellFor "drm" "gl";
         shell-drm-software = shellFor "drm" "software";
+        # Prebuilt Flutter assets for the channel demo (kernel_blob.bin, icons,
+        # shaders and icudtl.dat). Built once offline (see examples/channel_demo)
+        # and checked into assets-bundle/ so the sandboxed build stays offline.
+        demoAssets = pkgs.runCommandLocal "channel-demo-assets" {} ''
+          mkdir -p $out
+          cp -r ${./examples/channel_demo/assets-bundle}/* $out/
+        '';
+
+        # A self-contained `nix run` target: the Wayland/GL shell driving the
+        # channel demo assets, bounded by a timeout so it never runs forever
+        # on a headless/CI box. Override with `nix run .#channel-demo -- 300`.
+        channel-demo = pkgs.writeShellScriptBin "channel-demo" ''
+          timeout_s="${toString demoTimeout}"
+          if [ "$#" -gt 0 ] && [ "$1" -ge 0 ] 2>/dev/null; then
+            timeout_s="$1"
+            shift
+          fi
+          exec ${pkgs.coreutils}/bin/timeout "$timeout_s" \
+            ${shell}/bin/shell_app \
+            --assets=${demoAssets} \
+            --icu=${demoAssets}/icudtl.dat \
+            --renderer=gl "$@"
+        '';
       in {
         flutter-engine = flutter-engine;
         default = flutter-engine;
         inherit shell shell-wayland-software shell-drm shell-drm-software;
+        inherit channel-demo demoAssets;
+      };
+    }) supportedSystems);
+
+    apps = builtins.listToAttrs (map (system: {
+      name = system;
+      value = {
+        channel-demo = {
+          type = "app";
+          program = "${self.packages.${system}.channel-demo}/bin/channel-demo";
+        };
       };
     }) supportedSystems);
 

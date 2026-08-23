@@ -262,8 +262,8 @@ inline auto init(state& s) -> result<void>
         s.channels, "shell/demo",
         [](const std::string& method) -> result<std::vector<std::uint8_t>>
         {
-            if (method == "echo")
-                return codec::encode_string("pong");
+            if (method == "echo" ) return codec::encode_string("pong");
+            if (method == "ping") return codec::encode_string("pong");
             return std::unexpected(
                 error{.code = error_code::plugin, .message = "unknown demo method"});
         });
