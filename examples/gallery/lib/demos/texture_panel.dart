@@ -39,21 +39,18 @@ class _TexturePanelState extends State<TexturePanel> {
 
   Future<void> _bootstrap() async {
     // Tell the embedder to allocate an external texture with this id.
-    debugPrint('[gallery] texture bootstrap start');
+    bool ok = false;
     try {
-      final ok = await _channel.invokeMethod<bool>('register', _kId);
-      debugPrint('[gallery] texture register returned: $ok');
-      if (!mounted || ok != true) return;
-      setState(() => _pushing = true);
-      // Push a frame every ~66 ms (~15 fps) to show a moving pattern.
-      _timer = Timer.periodic(const Duration(milliseconds: 66), (_) {
-        _pushFrame();
-      });
-    } on PlatformException catch (e) {
-      debugPrint('[gallery] texture register error: ${e.message}');
-      // Texture bridge unavailable (e.g. GL-only build); show a hint.
-      if (mounted) setState(() => _pushing = false);
+      ok = (await _channel.invokeMethod<bool>('register', _kId)) ?? false;
+    } on PlatformException {
+      ok = false; // texture bridge unavailable (GL-only build)
     }
+    if (!mounted || !ok) return;
+    setState(() => _pushing = true);
+    // Push a frame every ~66 ms (~15 fps) to show a moving pattern.
+    _timer = Timer.periodic(const Duration(milliseconds: 66), (_) {
+      _pushFrame();
+    });
   }
 
   Future<void> _pushFrame() async {
@@ -67,7 +64,6 @@ class _TexturePanelState extends State<TexturePanel> {
       ]);
     } on PlatformException {
       // Ignore transient failures; the panel stays live.
-      debugPrint('[gallery] texture pushFrame error');
     }
   }
 
@@ -77,14 +73,14 @@ class _TexturePanelState extends State<TexturePanel> {
     final t = n / 15.0; // seconds-ish
     for (var y = 0; y < _size; y++) {
       for (var x = 0; x < _size; x++) {
-        final band = (x + (_frame * 6)) % _size;
+        final band = (x + (n * 6)) % _size;
         // Vertical color bars hue-shifting over time.
         var r = (band * 255 / _size).round();
         var g = ((x + y) / (2 * _size) * 255).round();
         var b = ((x * math.cos(t) + y * math.sin(t)).abs().round() % 256);
         // A bright diagonal sweep.
         final d = math.sqrt(math.pow(x - 128, 2) + math.pow(y - 128, 2));
-        final onSweep = d < 40 + (_frame % 40);
+        final onSweep = d < 40 + (n % 40);
         if (onSweep) {
           r = 255;
           g = 255;
@@ -105,7 +101,10 @@ class _TexturePanelState extends State<TexturePanel> {
     return ListView(
       padding: const EdgeInsets.all(24),
       children: [
-        const Text('shell/texture external texture', style: TextStyle(fontSize: 20)),
+        const Text(
+          'shell/texture external texture',
+          style: TextStyle(fontSize: 20),
+        ),
         const SizedBox(height: 8),
         const Text(
           'The Dart side registers an external texture and pushes CPU-rendered '

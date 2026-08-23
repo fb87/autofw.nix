@@ -32,34 +32,6 @@ bool clear_current(void*)
 
 bool present(void* d)
 {
-    static int present_count = 0;
-    static int frames_dumped = 0;
-    int pc = ++present_count;
-    bool dump_now = frames_dumped < 14 && (pc <= 2 || (pc % 90) <= 2);
-    if (dump_now)
-    {
-        GLint vp[4] = {0,0,0,0};
-        glGetIntegerv(GL_VIEWPORT, vp);
-        GLsizei w = vp[2], h = vp[3];
-        if (w > 0 && h > 0)
-        {
-            std::vector<std::uint8_t> px(size_t(w)*size_t(h)*4);
-            glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
-            char path[80]; std::snprintf(path, sizeof path, "/tmp/gl_%d.ppm", frames_dumped++);
-            std::FILE* fp = std::fopen(path, "w");
-            if (fp)
-            {
-                std::fprintf(fp, "P6\n%d %d\n255\n", w, h);
-                for (GLsizei y = 0; y < h; ++y)
-                {
-                    const auto* row = px.data() + size_t(h-1-y)*size_t(w)*4;
-                    for (GLsizei x = 0; x < w; ++x)
-                    { std::fputc(row[x*4+0], fp); std::fputc(row[x*4+1], fp); std::fputc(row[x*4+2], fp); }
-                }
-                std::fclose(fp);
-            }
-        }
-    }
     return static_cast<state*>(d)->out->present(static_cast<state*>(d)->out->state);
 }
 
@@ -562,10 +534,7 @@ inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,
     }
     if (!ok)
         return false;
-    bool marked = FlutterEngineMarkExternalTextureFrameAvailable(s.fl, id) == kSuccess;
-    static int marks=0;
-    if (marks++ < 4) std::fprintf(stderr, "[tex] push_texture_frame id=%ld w=%u h=%u upload_ok=%d marked=%d\n", (long)id, w, h, ok, marked);
-    return marked;
+    return FlutterEngineMarkExternalTextureFrameAvailable(s.fl, id) == kSuccess;
 #else
     // Software mode has no GL upload context; GL-backed external textures are
     // unsupported and must fail capability negotiation cleanly.
@@ -593,8 +562,6 @@ bool external_texture_frame(void* d, std::int64_t id, std::size_t, std::size_t,
     out->height = t.height;
     out->user_data = nullptr;
     out->destruction_callback = nullptr;
-    static int etf=0;
-    if (etf++ < 4) std::fprintf(stderr, "[tex] external_texture_frame id=%ld name=%u w=%u h=%u\n", (long)id, t.name, t.width, t.height);
     return true;
 }
 #else
