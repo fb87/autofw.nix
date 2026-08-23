@@ -65,16 +65,27 @@ inline auto evdev_to_hid(std::uint32_t code) -> std::uint16_t
         return 40;
     if (code == 58)
         return 41;
-    if (code == 103)
-        return 0x52;
-    if (code == 108)
-        return 0x51;
-    if (code == 105)
-        return 0x50;
-    if (code == 106)
-        return 0x4F;
+    // USB HID keyboard/Keypad usages for the editing/navigation cluster.
+    if (code == 110)
+        return 0x49; // Insert
+    if (code == 102)
+        return 0x4A; // Home
+    if (code == 104)
+        return 0x4B; // PageUp
     if (code == 111)
-        return 0x4A;
+        return 0x4C; // Delete
+    if (code == 107)
+        return 0x4D; // End
+    if (code == 109)
+        return 0x4E; // PageDown
+    if (code == 106)
+        return 0x4F; // Right
+    if (code == 105)
+        return 0x50; // Left
+    if (code == 108)
+        return 0x51; // Down
+    if (code == 103)
+        return 0x52; // Up
     return static_cast<std::uint16_t>((code << 8) | 0xFF);
 }
 
@@ -202,8 +213,12 @@ inline auto translate(state& s, std::uint32_t evdev_code, bool pressed) -> key_r
         int n = xkb_state_key_get_utf8(s.xkbd, xkc, buf, sizeof(buf) - 1);
         if (n > 0 && pressed)
             out.character.assign(buf, static_cast<std::size_t>(n));
-        if (sym >= 0x20 && sym <= 0x10FFFF && sym != 0x01000000)
-            out.logical = sym;
+        // Route the keysym: a printable symbol becomes the logical key directly;
+        // special/navigation keysyms (Home, arrows, ...) are translated to
+        // Flutter's LogicalKeyboardKey values by keysym_to_logical.
+        std::uint32_t utf = xkb_keysym_to_utf32(sym);
+        if (utf != 0)
+            out.logical = utf;
         else
             out.logical = detail::keysym_to_logical(sym);
     }
@@ -351,16 +366,27 @@ inline auto evdev_to_hid(std::uint32_t code) -> std::uint16_t
         return 40;
     if (code == 58)
         return 41;
-    if (code == 103)
-        return 0x52;
-    if (code == 108)
-        return 0x51;
-    if (code == 105)
-        return 0x50;
-    if (code == 106)
-        return 0x4F;
+    // USB HID keyboard/Keypad usages for the editing/navigation cluster.
+    if (code == 110)
+        return 0x49; // Insert
+    if (code == 102)
+        return 0x4A; // Home
+    if (code == 104)
+        return 0x4B; // PageUp
     if (code == 111)
-        return 0x4A;
+        return 0x4C; // Delete
+    if (code == 107)
+        return 0x4D; // End
+    if (code == 109)
+        return 0x4E; // PageDown
+    if (code == 106)
+        return 0x4F; // Right
+    if (code == 105)
+        return 0x50; // Left
+    if (code == 108)
+        return 0x51; // Down
+    if (code == 103)
+        return 0x52; // Up
     return static_cast<std::uint16_t>((code << 8) | 0xFF);
 }
 
@@ -488,8 +514,12 @@ inline auto translate(state& s, std::uint32_t evdev_code, bool pressed) -> key_r
         int n = xkb_state_key_get_utf8(s.xkbd, xkc, buf, sizeof(buf) - 1);
         if (n > 0 && pressed)
             out.character.assign(buf, static_cast<std::size_t>(n));
-        if (sym >= 0x20 && sym <= 0x10FFFF && sym != 0x01000000)
-            out.logical = sym;
+        // Route the keysym: a printable symbol becomes the logical key directly;
+        // special/navigation keysyms (Home, arrows, ...) are translated to
+        // Flutter's LogicalKeyboardKey values by keysym_to_logical.
+        std::uint32_t utf = xkb_keysym_to_utf32(sym);
+        if (utf != 0)
+            out.logical = utf;
         else
             out.logical = detail::keysym_to_logical(sym);
     }

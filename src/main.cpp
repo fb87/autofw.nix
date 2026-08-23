@@ -6,6 +6,7 @@
 #include <getopt.h>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <shell/engine.hpp>
@@ -25,6 +26,7 @@ struct options
     std::string icu;
     std::string renderer{"gl"}; // "gl" | "software"
     bool test_texture{};
+    bool test_input{};
 };
 
 void print_usage(const char* prog)
@@ -35,6 +37,7 @@ void print_usage(const char* prog)
                  "  --icu P          icudtl.dat path (default <assets>/icudtl.dat)\n"
                  "  --renderer R     gl | software (default gl)\n"
                  "  --test-texture   run a demo external-texture producer\n"
+                 "  --test-input     drive a scripted sequence of key events to exercise input\n"
                  "  --help           show this help\n",
                  prog);
 }
@@ -46,6 +49,7 @@ options parse_args(int argc, char** argv)
         {"icu", required_argument, nullptr, 'i'},
         {"renderer", required_argument, nullptr, 'r'},
         {"test-texture", no_argument, nullptr, 't'},
+        {"test-input", no_argument, nullptr, 'x'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
@@ -66,6 +70,9 @@ options parse_args(int argc, char** argv)
             break;
         case 't':
             out.test_texture = true;
+            break;
+        case 'x':
+            out.test_input = true;
             break;
         case 'h':
         default:
@@ -106,6 +113,44 @@ void run_demo_texture(shell::engine::state* e, bool* running)
         ++frame;
         std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
+}
+
+// Drive a scripted, deterministic sequence of key events straight through
+// engine::send_key (the same code path compositor key events use). The Dart
+// app mirrors each back via a method channel so a test can assert the round
+// trip. Used as `--test-input` for the GUI input automation test.
+void run_input_test(shell::engine::state* e, bool* running)
+{
+    // (evdev code, label): cover letters, digits, punctuation, editing, nav.
+    static const std::pair<std::uint32_t, const char*> kKeys[] = {
+        {30, "a"}, {48, "b"}, {46, "c"}, {32, "d"}, {18, "e"}, {33, "f"},
+        {34, "g"}, {35, "h"}, {23, "i"}, {36, "j"}, {37, "k"}, {38, "l"},
+        {50, "m"}, {49, "n"}, {24, "o"}, {25, "p"}, {16, "q"}, {19, "r"},
+        {31, "s"}, {20, "t"}, {22, "u"}, {47, "v"}, {17, "w"}, {45, "x"},
+        {21, "y"}, {44, "z"},
+        {2, "1"}, {3, "2"}, {4, "3"}, {5, "4"}, {6, "5"}, {7, "6"},
+        {8, "7"}, {9, "8"}, {10, "9"}, {11, "0"},
+        // Navigation tested while the field is still connected (before Enter
+        // performs the field action and unfocuses it).
+        {103, "up"}, {108, "down"}, {105, "left"}, {106, "right"},
+        {102, "home"}, {107, "end"}, {104, "pageup"}, {109, "pagedown"},
+        {110, "insert"}, {111, "delete"},
+        {57, "space"}, {14, "backspace"}, {28, "enter"}, {15, "tab"},
+    };
+    // Let the app finish booting and the text field focus.
+    std::this_thread::sleep_for(std::chrono::seconds(6));
+    for (const auto& [code, label] : kKeys)
+    {
+        // Queue on the event loop (platform) thread via the pending queue; the
+        // queued events are drained by backend.cb.on_poll each loop iteration.
+        shell::engine::queue_key(*e, code, true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        shell::engine::queue_key(*e, code, false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    }
+    std::fprintf(stderr, "[test-input] queued %zu key sequences\n",
+                 sizeof(kKeys) / sizeof(kKeys[0]));
+    *running = false;
 }
 } // namespace
 
@@ -152,6 +197,7 @@ int main(int argc, char** argv)
     backend.cb.on_resize = [&](std::uint32_t w, std::uint32_t h)
     { shell::engine::on_resize(engine, w, h); };
     backend.cb.on_close = [&] { shell::engine::on_close(engine); };
+    backend.cb.on_poll = [&] { shell::engine::drain_keys(engine); };
 #else
     shell::backend::drm::config cfg{.device = "/dev/dri/card0"};
     shell::backend::drm::state backend = shell::backend::drm::create(cfg);
@@ -183,6 +229,14 @@ int main(int argc, char** argv)
         producer = std::thread(run_demo_texture, &engine, &producer_running);
     }
 
+    std::thread keytest;
+    bool keytest_running = false;
+    if (opts.test_input)
+    {
+        keytest_running = true;
+        keytest = std::thread(run_input_test, &engine, &keytest_running);
+    }
+
 #ifdef SHELL_BACKEND_WAYLAND
     shell::backend::wayland::run(backend);
 #else
@@ -194,6 +248,11 @@ int main(int argc, char** argv)
         producer_running = false;
         producer.join();
         shell::engine::unregister_texture(engine, kDemoTextureId);
+    }
+    if (keytest.joinable())
+    {
+        keytest_running = false;
+        keytest.join();
     }
     shell::engine::destroy(engine);
 #ifdef SHELL_BACKEND_WAYLAND

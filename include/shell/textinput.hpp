@@ -499,6 +499,29 @@ inline auto request_action(state& s) -> void
     s.action_pending = true;
 }
 
+// Move the caret without changing the text (framework key routing is not
+// available in this embedder, so the IME owns navigation).
+inline auto move_caret(state& s, int delta, bool to_home) -> void
+{
+    if (!s.connected)
+        return;
+    std::size_t at = s.selection_base < 0 ? s.text.size()
+                                          : static_cast<std::size_t>(s.selection_base);
+    if (at > s.text.size())
+        at = s.text.size();
+    std::size_t caret = at;
+    if (to_home)
+    {
+        caret = delta <= -2 ? s.text.size() : 0; // delta<=-2 signals END (go to end)
+    }
+    else if (delta < 0)
+        caret = at == 0 ? 0 : at - 1;
+    else if (delta > 0)
+        caret = at >= s.text.size() ? s.text.size() : at + 1;
+    s.selection_base = s.selection_extent = static_cast<std::int64_t>(caret);
+    s.dirty = true;
+}
+
 // Build the JSON payload for TextInputClient.performAction.
 inline auto perform_action_json(const state& s) -> std::string
 {

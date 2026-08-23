@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 
 #include <flutter_embedder.h>
 
@@ -72,6 +73,11 @@ struct state
     std::mutex vsync_mutex;
     std::queue<std::intptr_t> batons;
     std::uint32_t last_buttons{};
+
+    // Injected key events waiting to be drained on the platform thread
+    // (used by the --test-input automation hook).
+    std::mutex keyq_mutex;
+    std::deque<std::pair<std::uint32_t, bool>> keyq;
 };
 
 } // namespace shell::engine

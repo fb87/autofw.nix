@@ -1,6 +1,7 @@
 // engine_impl.hpp -- implementation of the shell Flutter engine wrapper.
 // Included at the bottom of engine.hpp; must not include engine.hpp back.
 
+#include <atomic>
 #include <cstdio>
 #include <functional>
 #include <span>
@@ -450,31 +451,55 @@ inline void send_pointer(state& s, const input::pointer_event& ev)
     FlutterEngineSendPointerEvent(s.fl, &pt, 1);
 }
 
+// Forward declaration (defined below).
+inline void send_key(state& s, std::uint32_t evdev_code, bool down);
+// Queue a key event for delivery on the platform thread (--test-input hook).
+inline void queue_key(state& s, std::uint32_t code, bool down)
+{
+    std::lock_guard lock(s.keyq_mutex);
+    s.keyq.emplace_back(code, down);
+}
+
+// Drain queued key events into send_key; must run on the platform thread.
+inline auto drain_keys(state& s) -> void
+{
+    std::deque<std::pair<std::uint32_t, bool>> batch;
+    {
+        std::lock_guard lock(s.keyq_mutex);
+        batch.swap(s.keyq);
+    }
+    for (const auto& [code, down] : batch)
+        send_key(s, code, down);
+}
+
 inline void send_key(state& s, std::uint32_t evdev_code, bool down)
 {
     keyboard::ensure_default_keymap(s.kb);
     keyboard::key_result r = keyboard::translate(s.kb, evdev_code, down);
-    auto captured = std::make_shared<keyboard::key_result>(r);
     std::uint32_t ev = evdev_code;
-    auto deliver = [&s, captured, down, ev]
+
+    // Translate on the caller's thread, then deliver on the RUNNER thread.
+    // Flutter's `flutter/keydata` channel (used by key events) must be serviced
+    // on the platform thread, which for this shell is the custom platform task
+    // runner (runner_thread). Sending from the Wayland dispatch thread makes the
+    // engine warn and drop the events, so shortcuts/arrows/home/end never fire.
+    auto payload = std::make_shared<keyboard::key_result>(r);
+    auto deliver = [&s, payload, ev, down]
     {
         FlutterKeyEvent key = {};
         key.struct_size = sizeof(key);
         key.timestamp = FlutterEngineGetCurrentTime();
         key.type = down ? kFlutterKeyEventTypeDown : kFlutterKeyEventTypeUp;
-        key.physical = captured->physical_hid;
-        key.logical = captured->logical;
-        key.character = (down && !captured->character.empty())
-                            ? captured->character.c_str()
-                            : nullptr;
+        key.physical = 0x00070000ull | payload->physical_hid; // PhysicalKeyboardKey
+        key.logical = payload->logical;
+        key.character = (down && !payload->character.empty()) ? payload->character.c_str() : nullptr;
         key.synthesized = false;
         key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
-        FlutterEngineSendKeyEvent(s.fl, &key, nullptr, nullptr);
+        FlutterEngineResult kr = FlutterEngineSendKeyEvent(s.fl, &key, nullptr, nullptr);
+        std::fprintf(stderr, "[kr] rc=%d\n", (int)kr);
 
-        // Drive host-side IME under the state lock: mirror a hardware key into
-        // a focused TextField, and build the host->framework JSON payloads.
-        // The payloads are sent after the lock is released to avoid any
-        // re-entrancy with FlutterEngineSendPlatformMessage.
+        // Drive host-side IME under the state lock, building host->framework
+        // JSON; send it after the lock is released.
         std::string update_json, action_json;
         {
             std::lock_guard lock(s.ti.mutex);
@@ -488,12 +513,24 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
                 {
                     textinput::forward_delete(s.ti);
                 }
-                else if (!captured->character.empty() &&
-                         captured->character[0] < 0x20)
+                else if (ev == 105 /* KEY_LEFT */)
                 {
-                    // Control character (Enter -> '\r', Tab -> '\t'): don't
-                    // splice it literally. A multi-line field turns Enter into
-                    // a hard newline; otherwise the field performs its action.
+                    textinput::move_caret(s.ti, -1, false);
+                }
+                else if (ev == 106 /* KEY_RIGHT */)
+                {
+                    textinput::move_caret(s.ti, +1, false);
+                }
+                else if (ev == 102 /* KEY_HOME */)
+                {
+                    textinput::move_caret(s.ti, 0, true);
+                }
+                else if (ev == 107 /* KEY_END */)
+                {
+                    textinput::move_caret(s.ti, -2, true); // sentinel: go to end
+                }
+                else if (!payload->character.empty() && payload->character[0] < 0x20)
+                {
                     if (ev == 28 /* KEY_ENTER */ && s.ti.multiline)
                     {
                         textinput::insert_characters(s.ti, "\n");
@@ -503,10 +540,9 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
                         textinput::request_action(s.ti);
                     }
                 }
-                else if (!captured->character.empty())
+                else if (!payload->character.empty())
                 {
-                    // A single key typically yields one character; insert it.
-                    textinput::insert_characters(s.ti, captured->character);
+                    textinput::insert_characters(s.ti, payload->character);
                 }
             }
             if (s.ti.action_pending && s.ti.connected)
@@ -520,7 +556,6 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
                 s.ti.dirty = false;
             }
         }
-        // Push host->framework IME updates (after releasing the lock).
         const std::string kChan = "flutter/textinput";
         auto send_pm = [&](const std::string& json)
         {
@@ -536,9 +571,11 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
         send_pm(action_json);
         send_pm(update_json);
     };
-    std::lock_guard lock(s.runner_mutex);
-    s.runner_q.push_back(deliver);
-    s.runner_cv.notify_one();
+    {
+        std::lock_guard lock(s.runner_mutex);
+        s.runner_q.push_back(deliver);
+        s.runner_cv.notify_one();
+    }
 }
 
 inline void on_resize(state& s, std::uint32_t width, std::uint32_t height)
@@ -645,6 +682,7 @@ void on_platform_message(const FlutterPlatformMessage* m, void* d)
     auto* e = static_cast<state*>(d);
     if (m == nullptr || e->fl == nullptr)
         return;
+
     if (std::string_view(m->channel).find("textinput") != std::string_view::npos)
     {
         // Flutter drives the IME over the JSON-method-coded `flutter/textinput`
@@ -655,6 +693,9 @@ void on_platform_message(const FlutterPlatformMessage* m, void* d)
         {
             std::lock_guard lock(e->ti.mutex);
             resp = textinput::handle(e->ti, payload);
+            std::fprintf(stderr, "[sel] client=%ld text='%.48s' sel=%ld..%ld\n",
+                         (long)e->ti.client, e->ti.text.c_str(),
+                         (long)e->ti.selection_base, (long)e->ti.selection_extent);
         }
         // We must always answer (even a bare ACK keeps the connection alive).
         if (resp.empty())

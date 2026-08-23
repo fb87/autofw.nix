@@ -50,6 +50,9 @@ struct callbacks
     std::function<void(int, std::uint32_t)> on_keymap;
     std::function<void(std::uint32_t, std::uint32_t)> on_resize;
     std::function<void()> on_close;
+    // Called each event-loop iteration on the platform thread; used by the
+    // shell to marshal injected key events (--test-input) onto that thread.
+    std::function<void()> on_poll;
 };
 
 struct state
@@ -498,6 +501,9 @@ inline auto run(state& s) -> void
             s.cb.on_vsync();
             next_tick += kPeriod;
         }
+        // Let the shell drain any injected key events onto the platform thread.
+        if (s.cb.on_poll)
+            s.cb.on_poll();
     }
 }
 
