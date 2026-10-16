@@ -1,0 +1,25 @@
+name: GCC 11 compatibility
+
+on:
+  push:
+    branches:
+      - fix/gcc11-cxx20-expected
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gcc11-result:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GCC 11
+        run: sudo apt-get update && sudo apt-get install -y gcc-11 g++-11
+      - name: Verify compiler
+        run: |
+          gcc-11 --version
+          g++-11 --version
+      - name: Compile with GCC 11 (C++20)
+        run: |
+          g++-11 -std=c++20 -Wall -Wextra -Werror -pedantic -Iinclude tests/result/main.cpp -o /tmp/shell-result-test
+      - name: Run GCC 11 result tests
+        run: /tmp/shell-result-test

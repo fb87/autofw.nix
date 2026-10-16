@@ -142,7 +142,7 @@ inline auto run(state& s, id tid) -> result<void>
 {
     auto it = s.map.find(tid);
     if (it == s.map.end())
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::invalid_argument, .message = "transition id"});
     it->second.phase = status::running;
     return {};
@@ -186,7 +186,7 @@ inline auto cancel(state& s, id tid) -> result<void>
 {
     auto it = s.map.find(tid);
     if (it == s.map.end())
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::invalid_argument, .message = "transition id"});
     it->second.phase = status::cancelled;
     it->second.progress = 0.0F;

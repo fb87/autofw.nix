@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(shell_app LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 if(NOT CMAKE_BUILD_TYPE)
@@ -109,6 +109,9 @@ if(SHELL_BUILD_TESTS)
   add_executable(shell_headers_test tests/headers/main.cpp)
   target_link_libraries(shell_headers_test PRIVATE shell_impl)
   add_test(NAME shell.headers COMMAND shell_headers_test)
+  add_executable(shell_result_test tests/result/main.cpp)
+  target_include_directories(shell_result_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  add_test(NAME shell.result COMMAND shell_result_test)
 endif()
 
 install(TARGETS shell_app RUNTIME DESTINATION bin)

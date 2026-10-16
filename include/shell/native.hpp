@@ -43,14 +43,14 @@ inline auto negotiate(const renderer::type renderer_type, const capabilities& ca
     {
         if (supports(caps, capability::cpu_buffer))
             return {};
-        return std::unexpected(error{
+        return shell::unexpected(error{
             .code = error_code::plugin,
             .message = "plugin has no cpu_buffer capability for software mode",
         });
     }
     // Accelerated mode accepts any supported path, but at least one is needed.
     if (caps.supported.empty())
-        return std::unexpected(error{.code = error_code::plugin,
+        return shell::unexpected(error{.code = error_code::plugin,
                                      .message = "plugin declares no capabilities"});
     return {};
 }

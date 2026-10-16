@@ -199,7 +199,7 @@ inline auto init(state& s) -> result<void>
         s.gl_ctx = egl::create_context(dpy, cfg, EGL_NO_CONTEXT);
         if (s.gl_ctx == EGL_NO_CONTEXT)
         {
-            return std::unexpected(
+            return shell::unexpected(
                 error{.code = error_code::egl, .message = "gl context"});
         }
         s.resource_ctx = egl::create_context(dpy, cfg, s.gl_ctx);
@@ -253,7 +253,7 @@ inline auto init(state& s) -> result<void>
         std::free(asset_buf);
         std::free(icu_buf);
         stop_runner(s);
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::flutter, .message = "init failed"});
     }
     s.fl = fl;
@@ -262,7 +262,7 @@ inline auto init(state& s) -> result<void>
     if (FlutterEngineRunInitialized(fl) != kSuccess)
     {
         stop_runner(s);
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::flutter, .message = "run failed"});
     }
 
@@ -281,7 +281,7 @@ inline auto init(state& s) -> result<void>
         {
             if (method == "echo") return codec::encode_string("pong");
             if (method == "ping") return codec::encode_string("pong");
-            return std::unexpected(
+            return shell::unexpected(
                 error{.code = error_code::plugin, .message = "unknown demo method"});
         });
 
@@ -304,11 +304,11 @@ inline auto init(state& s) -> result<void>
                     }
                 });
             if (!ok || idx < 2)
-                return std::unexpected(error{.code = error_code::plugin,
+                return shell::unexpected(error{.code = error_code::plugin,
                                              .message = "calc: need [a, b]"});
             if (method == "add") return codec::encode_int64(a + b);
             if (method == "mul") return codec::encode_int64(a * b);
-            return std::unexpected(
+            return shell::unexpected(
                 error{.code = error_code::plugin, .message = "calc: unknown method"});
         });
 
@@ -321,11 +321,11 @@ inline auto init(state& s) -> result<void>
             if (method == "register")
             {
                 if (!codec::decode_int64(args, id))
-                    return std::unexpected(error{.code = error_code::plugin,
+                    return shell::unexpected(error{.code = error_code::plugin,
                                                  .message = "texture: register needs id"});
                 auto r = register_texture(s, static_cast<texture::id>(id));
                 if (!r)
-                    return std::unexpected(r.error());
+                    return shell::unexpected(r.error());
                 return codec::encode_bool(true);
             }
             if (method == "unregister")
@@ -357,17 +357,17 @@ inline auto init(state& s) -> result<void>
                         }
                     });
                 if (idx < 4 || w <= 0 || h <= 0 || rgba.size() < 4)
-                    return std::unexpected(error{.code = error_code::plugin,
+                    return shell::unexpected(error{.code = error_code::plugin,
                                                  .message = "texture: bad pushFrame args"});
                 bool ok = push_texture_frame(s, static_cast<texture::id>(id),
                                              static_cast<std::uint32_t>(w),
                                              static_cast<std::uint32_t>(h), rgba);
                 if (!ok)
-                    return std::unexpected(error{.code = error_code::texture,
+                    return shell::unexpected(error{.code = error_code::texture,
                                                  .message = "texture: push failed (GL only)"});
                 return codec::encode_bool(true);
             }
-            return std::unexpected(
+            return shell::unexpected(
                 error{.code = error_code::plugin, .message = "texture: unknown method"});
         });
 
@@ -608,7 +608,7 @@ inline auto register_texture(state& s, texture::id id) -> result<void>
     if (FlutterEngineRegisterExternalTexture(s.fl, id) != kSuccess)
     {
         texture::unregister_id(s.textures, id);
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::texture, .message = "register"});
     }
     return {};
