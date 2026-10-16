@@ -380,7 +380,7 @@ inline auto connect(state& s) -> result<void>
         wl_display_connect(s.cfg.display.empty() ? nullptr : s.cfg.display.data());
     if (s.display == nullptr)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::wayland, .message = "connect failed"});
     }
     s.registry = wl_display_get_registry(s.display);
@@ -388,7 +388,7 @@ inline auto connect(state& s) -> result<void>
     wl_display_roundtrip(s.display);
     if (!s.compositor || !s.wm_base || !s.seat)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::wayland, .message = "missing globals"});
     }
     return {};
@@ -408,7 +408,7 @@ inline auto setup_egl(state& s) -> result<void>
         eglInitialize(static_cast<EGLDisplay>(s.egl.display), nullptr, nullptr) !=
             EGL_TRUE)
     {
-        return std::unexpected(error{.code = error_code::egl, .message = "egl init"});
+        return shell::unexpected(error{.code = error_code::egl, .message = "egl init"});
     }
     return egl::choose_config(static_cast<EGLDisplay>(s.egl.display),
                               static_cast<EGLConfig*>(&s.egl.config));
@@ -420,7 +420,7 @@ inline auto setup_surface(state& s) -> result<void>
     s.surface = wl_compositor_create_surface(s.compositor);
     if (!s.surface)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::wayland, .message = "create_surface"});
     }
     s.xs = xdg_wm_base_get_xdg_surface(s.wm_base, s.surface);
@@ -438,7 +438,7 @@ inline auto setup_surface(state& s) -> result<void>
                                        static_cast<int>(s.height));
     if (!s.wl_window)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::egl, .message = "wl_egl_window"});
     }
     EGLNativeWindowType native = reinterpret_cast<EGLNativeWindowType>(
@@ -448,7 +448,7 @@ inline auto setup_surface(state& s) -> result<void>
                                static_cast<EGLConfig>(s.egl.config), native, nullptr);
     if (s.egl.surface == EGL_NO_SURFACE)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::egl, .message = "egl window surface"});
     }
 #else
