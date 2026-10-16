@@ -94,14 +94,14 @@ inline auto open_device(state& s) -> result<void>
     int fd = open(s.cfg.device.data(), O_RDWR | O_CLOEXEC);
     if (fd < 0)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::drm, .message = "open drm device"});
     }
     drmVersionPtr ver = drmGetVersion(fd);
     if (!ver)
     {
         close(fd);
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::drm, .message = "drmGetVersion failed"});
     }
     drmFreeVersion(ver);
@@ -114,7 +114,7 @@ inline auto setup_kms(state& s) -> result<void>
     drmModeResPtr res = drmModeGetResources(s.fd);
     if (!res)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::drm, .message = "drmModeGetResources"});
     }
     bool found = false;
@@ -153,7 +153,7 @@ inline auto setup_kms(state& s) -> result<void>
     drmModeFreeResources(res);
     if (!found || !s.crtc_id)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::drm, .message = "no connector/crtc"});
     }
     return {};
@@ -164,14 +164,14 @@ inline auto setup_gbm(state& s) -> result<void>
     s.gbm_dev = gbm_create_device(s.fd);
     if (!s.gbm_dev)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::drm, .message = "gbm_create_device"});
     }
     s.gbm_surf = gbm_surface_create(s.gbm_dev, s.width, s.height, GBM_FORMAT_XRGB8888,
                                     GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
     if (!s.gbm_surf)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::drm, .message = "gbm_surface_create"});
     }
     return {};
@@ -190,7 +190,7 @@ inline auto setup_egl(state& s) -> result<void>
         eglInitialize(static_cast<EGLDisplay>(s.egl.display), nullptr, nullptr) !=
             EGL_TRUE)
     {
-        return std::unexpected(error{.code = error_code::egl, .message = "egl init"});
+        return shell::unexpected(error{.code = error_code::egl, .message = "egl init"});
     }
     auto err = egl::choose_config(static_cast<EGLDisplay>(s.egl.display),
                                   static_cast<EGLConfig*>(&s.egl.config));
@@ -201,7 +201,7 @@ inline auto setup_egl(state& s) -> result<void>
         (void*)s.gbm_surf, nullptr);
     if (s.egl.surface == EGL_NO_SURFACE)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::egl, .message = "egl window surface"});
     }
     return {};
@@ -335,7 +335,7 @@ inline auto setup_dumb_buffers(state& s) -> result<void>
         req.height = s.height;
         req.bpp = 32;
         if (drmIoctl(s.fd, DRM_IOCTL_MODE_CREATE_DUMB, &req) < 0)
-            return std::unexpected(error{.code = error_code::drm,
+            return shell::unexpected(error{.code = error_code::drm,
                                          .message = "create dumb buffer"});
         buf.handle = req.handle;
         s.dumb_stride = req.pitch;
@@ -343,16 +343,16 @@ inline auto setup_dumb_buffers(state& s) -> result<void>
         drm_mode_map_dumb mp{};
         mp.handle = buf.handle;
         if (drmIoctl(s.fd, DRM_IOCTL_MODE_MAP_DUMB, &mp) < 0)
-            return std::unexpected(error{.code = error_code::drm,
+            return shell::unexpected(error{.code = error_code::drm,
                                          .message = "map dumb buffer"});
         buf.map = mmap(nullptr, buf.size, PROT_READ | PROT_WRITE, MAP_SHARED,
                        s.fd, mp.offset);
         if (buf.map == MAP_FAILED)
-            return std::unexpected(error{.code = error_code::drm,
+            return shell::unexpected(error{.code = error_code::drm,
                                          .message = "mmap dumb buffer"});
         if (drmModeAddFB(s.fd, s.width, s.height, 24, 32, s.dumb_stride,
                          buf.handle, &buf.fb_id) != 0)
-            return std::unexpected(error{.code = error_code::drm,
+            return shell::unexpected(error{.code = error_code::drm,
                                          .message = "add dumb fb"});
     }
     return {};
