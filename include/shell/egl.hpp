@@ -45,7 +45,7 @@ inline auto choose_config(EGLDisplay display, EGLConfig* config_out) -> result<v
     if (!eglChooseConfig(display, kAttribs, configs, 8, &num_configs) ||
         num_configs == 0)
     {
-        return std::unexpected(
+        return shell::unexpected(
             error{.code = error_code::egl, .message = "no suitable EGL config"});
     }
     *config_out = configs[0];
