@@ -80,8 +80,8 @@ struct state
     bool running{};
     bool configured{};
     bool pointer_added{};
-    bool frame_ready{};         // a frame callback has fired (ready for next)
-    bool frame_in_flight{};     // a vsync was handed out, awaiting a present
+    bool frame_ready{};     // a frame callback has fired (ready for next)
+    bool frame_in_flight{}; // a vsync was handed out, awaiting a present
     bool presented_once{};
     std::uint32_t buttons{};
     double pointer_x{};
@@ -155,7 +155,8 @@ inline void frame_done(void* d, wl_callback* cb, std::uint32_t)
     auto* s = static_cast<state*>(d);
     // The compositor has displayed the previous buffer; the FrameClife says we
     // may submit the next one. Signal one vsync to the engine (consumed by run).
-    if (s->frame_cb == cb) s->frame_cb = nullptr;
+    if (s->frame_cb == cb)
+        s->frame_cb = nullptr;
     // The compositor has displayed the previous buffer; a new frame may be
     // submitted now.
     s->frame_ready = true;
@@ -275,11 +276,10 @@ inline void p_enter(void* d, wl_pointer*, std::uint32_t, wl_surface* sx, wl_fixe
     s->pointer_y = wl_fixed_to_double(py);
     if (s->cb.on_pointer)
     {
-        s->cb.on_pointer(input::pointer_event{
-            .phase = input::pointer_phase::add,
-            .x = s->pointer_x,
-            .y = s->pointer_y,
-            .buttons = s->buttons});
+        s->cb.on_pointer(input::pointer_event{.phase = input::pointer_phase::add,
+                                              .x = s->pointer_x,
+                                              .y = s->pointer_y,
+                                              .buttons = s->buttons});
     }
 }
 inline void p_leave(void* d, wl_pointer*, std::uint32_t, wl_surface*)
@@ -340,11 +340,10 @@ inline void p_axis(void* d, wl_pointer*, std::uint32_t, std::uint32_t, wl_fixed_
     auto* s = static_cast<state*>(d);
     if (s->cb.on_pointer)
     {
-        s->cb.on_pointer(input::pointer_event{
-            .phase = input::pointer_phase::up,
-            .x = s->pointer_x,
-            .y = s->pointer_y,
-            .buttons = s->buttons});
+        s->cb.on_pointer(input::pointer_event{.phase = input::pointer_phase::up,
+                                              .x = s->pointer_x,
+                                              .y = s->pointer_y,
+                                              .buttons = s->buttons});
     }
 }
 inline void k_keymap(void* d, wl_keyboard*, std::uint32_t, std::int32_t fd,
@@ -380,7 +379,7 @@ inline auto connect(state& s) -> result<void>
         wl_display_connect(s.cfg.display.empty() ? nullptr : s.cfg.display.data());
     if (s.display == nullptr)
     {
-        return std::unexpected(
+        return unexpected(
             error{.code = error_code::wayland, .message = "connect failed"});
     }
     s.registry = wl_display_get_registry(s.display);
@@ -388,7 +387,7 @@ inline auto connect(state& s) -> result<void>
     wl_display_roundtrip(s.display);
     if (!s.compositor || !s.wm_base || !s.seat)
     {
-        return std::unexpected(
+        return unexpected(
             error{.code = error_code::wayland, .message = "missing globals"});
     }
     return {};
@@ -408,7 +407,7 @@ inline auto setup_egl(state& s) -> result<void>
         eglInitialize(static_cast<EGLDisplay>(s.egl.display), nullptr, nullptr) !=
             EGL_TRUE)
     {
-        return std::unexpected(error{.code = error_code::egl, .message = "egl init"});
+        return unexpected(error{.code = error_code::egl, .message = "egl init"});
     }
     return egl::choose_config(static_cast<EGLDisplay>(s.egl.display),
                               static_cast<EGLConfig*>(&s.egl.config));
@@ -420,7 +419,7 @@ inline auto setup_surface(state& s) -> result<void>
     s.surface = wl_compositor_create_surface(s.compositor);
     if (!s.surface)
     {
-        return std::unexpected(
+        return unexpected(
             error{.code = error_code::wayland, .message = "create_surface"});
     }
     s.xs = xdg_wm_base_get_xdg_surface(s.wm_base, s.surface);
@@ -438,8 +437,7 @@ inline auto setup_surface(state& s) -> result<void>
                                        static_cast<int>(s.height));
     if (!s.wl_window)
     {
-        return std::unexpected(
-            error{.code = error_code::egl, .message = "wl_egl_window"});
+        return unexpected(error{.code = error_code::egl, .message = "wl_egl_window"});
     }
     EGLNativeWindowType native = reinterpret_cast<EGLNativeWindowType>(
         reinterpret_cast<std::uintptr_t>(s.wl_window));
@@ -448,7 +446,7 @@ inline auto setup_surface(state& s) -> result<void>
                                static_cast<EGLConfig>(s.egl.config), native, nullptr);
     if (s.egl.surface == EGL_NO_SURFACE)
     {
-        return std::unexpected(
+        return unexpected(
             error{.code = error_code::egl, .message = "egl window surface"});
     }
 #else
@@ -461,7 +459,8 @@ inline auto setup_surface(state& s) -> result<void>
 // has displayed the presented buffer; that is the natural vsync for Flutter.
 inline auto arm_frame(state& s) -> void
 {
-    if (s.frame_cb) return;
+    if (s.frame_cb)
+        return;
     s.frame_cb = wl_surface_frame(s.surface);
     wl_callback_add_listener(s.frame_cb, &kFrame, &s);
     wl_surface_commit(s.surface);
@@ -476,13 +475,15 @@ inline auto run(state& s) -> void
     // layered on top later to eliminate over-draw.
     constexpr auto kPeriod = std::chrono::milliseconds(16);
     auto next_tick = std::chrono::steady_clock::now();
-    if (s.cb.on_vsync) s.cb.on_vsync();
+    if (s.cb.on_vsync)
+        s.cb.on_vsync();
 
     while (s.running)
     {
         auto now = std::chrono::steady_clock::now();
         auto to = next_tick - now;
-        if (to < std::chrono::steady_clock::duration::zero()) to = {};
+        if (to < std::chrono::steady_clock::duration::zero())
+            to = {};
         int to_ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(to).count());
 
@@ -645,8 +646,7 @@ inline bool software_present(void* d, const renderer::software::buffer& frame)
 
     // Attach and present the software buffer on the surface.
     wl_surface_attach(s->surface, s->shm_buffer, 0, 0);
-    wl_surface_damage(s->surface, 0, 0,
-                      static_cast<std::int32_t>(frame.width),
+    wl_surface_damage(s->surface, 0, 0, static_cast<std::int32_t>(frame.width),
                       static_cast<std::int32_t>(frame.height));
     wl_surface_commit(s->surface);
     // Arm a frame callback so the next render is gated on the compositor

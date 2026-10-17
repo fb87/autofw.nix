@@ -2,7 +2,7 @@
 
 ## 1. Normative rules
 
-- Use C++23 for the native framework.
+- Use C++20 for the native framework (GCC 11 compatible; no `<expected>`).
 - Use C for the stable dynamic-plugin ABI.
 - Use Dart for the Flutter-side framework and meta-application.
 - Prefer namespace over class.
@@ -240,7 +240,57 @@ Acceptance: Flutter animations synchronize to physical display refresh.
 Implement atomic KMS, explicit fences, robust DMA-BUF reuse, recovery paths,
 and hotplug where required.
 
-## 5. Definition of done
+### M21 - Release/AOT mode  ✅ AOT snapshot loading + cross-compiled arm64 toolchain
+
+Implement `FlutterEngineCreateAOTData`/`FlutterEngineCollectAOTData` loading
+(`--aot-lib`, auto-detected) and a true x86_64 -> aarch64 cross-compiled
+build of `shell_app` plus a release-capable engine, so a release bundle can
+be produced entirely on an x86_64 dev machine. See "Release/AOT toolchain"
+below for why this needs a separately pinned engine and Flutter SDK.
+
+Acceptance: `shell_app --aot-lib=<app.so>` runs a release-mode AOT snapshot
+instead of JIT-compiling `kernel_blob.bin`.
+
+## 5. Release/AOT toolchain
+
+Google's own generic Linux custom-embedder artifact
+(`<platform>-embedder.zip`, what `flake.nix`'s `flutter-engine` fetches, used
+by the debug/JIT gallery flow) is **JIT-only**: confirmed empirically --
+`FlutterEngineCreateAOTData` against it fails with `kInvalidArguments: AOT
+data can only be created in AOT mode`. Google's flavored Linux engine builds
+(`linux-arm64-release/libflutter_linux_gtk.so`) are AOT-capable but hide the
+embedder C ABI (`nm -D` shows no exported `FlutterEngine*` symbols) -- they're
+built for the GTK desktop runner, not a custom embedder. Neither artifact
+Google publishes works for `shell_app`'s release mode.
+
+`flake.nix`'s `arderaReleaseEnginePin` instead pins a build from
+[ardera/flutter-engine-binaries-for-arm](https://github.com/ardera/flutter-engine-binaries-for-arm),
+a community project that builds the engine from source specifically to keep
+the embedder ABI visible with AOT enabled -- the same project and recipe
+[flutter-pi](https://github.com/ardera/flutter-pi) documents and depends on.
+
+The Dart AOT snapshot format is coupled to the exact engine build, so the
+pinned engine commit must stay paired with a matching Flutter SDK used only
+for the release build (`examples/gallery/scripts/fetch-release-toolchain.sh`
+pins the matching version). This is why release builds use a second,
+separately-pinned Flutter SDK instead of the devShell's `pkgs.flutter`
+(3.41.9 vs. the pin's 3.47.7 at the time this was written) -- mixing a
+kernel snapshot compiled by one Flutter version with `gen_snapshot`/the
+engine from another fails outright (reproduced directly: a mismatched
+kernel snapshot makes `gen_snapshot` abort with `ApiError`).
+
+`examples/gallery/scripts/build-release-arm64.sh` bypasses `flutter build`'s
+own AOT target (`flutter assemble release_bundle_linux-arm64_assets`)
+entirely, because that target always resolves `gen_snapshot` through
+Flutter's own artifact cache -- which, for a Linux arm64 *target*, only ships
+a `gen_snapshot` that *runs on* arm64 (confirmed: it's a real aarch64 ELF),
+not one that cross-generates arm64 code from an x86_64 host. Instead it
+follows flutter-pi's documented manual recipe: compile the kernel snapshot
+directly via `dartaotruntime` + `frontend_server_aot.dart.snapshot`, then run
+ardera's `gen_snapshot_linux_x64_release` (a genuine x86_64 binary that
+cross-generates arm64 code) on the result.
+
+## 6. Definition of done
 
 A feature is complete only when:
 
@@ -255,7 +305,7 @@ A feature is complete only when:
 - documentation is updated
 - acceptance criteria are verified
 
-## 6. Guiding rule
+## 7. Guiding rule
 
 When choosing between framework cleverness and explicit composition, prefer
 explicit composition.

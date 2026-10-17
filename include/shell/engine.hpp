@@ -28,8 +28,8 @@
 #include <shell/log.hpp>
 #include <shell/renderer.hpp>
 #include <shell/result.hpp>
-#include <shell/texture.hpp>
 #include <shell/textinput.hpp>
+#include <shell/texture.hpp>
 
 namespace shell::engine
 {
@@ -38,6 +38,9 @@ struct config
 {
     std::string_view assets;
     std::string_view icu_data;
+    // Path to a release-mode AOT snapshot (libapp.so). Empty runs the
+    // engine in JIT mode against kernel_blob.bin in `assets` instead.
+    std::string_view aot_library;
     renderer::type renderer{renderer::type::automatic};
 };
 
@@ -51,6 +54,7 @@ struct state
     backend::output* out{};
 
     FlutterEngine fl{};
+    FlutterEngineAOTData aot_data{};
 
 #ifdef SHELL_RENDERER_GL
     EGLContext gl_ctx{EGL_NO_CONTEXT};

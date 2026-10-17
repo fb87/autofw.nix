@@ -50,8 +50,8 @@ struct state
 inline auto add(state& s, const manifest& m) -> result<id>
 {
     if (s.by_name.contains(m.id))
-        return std::unexpected(error{.code = error_code::plugin,
-                                     .message = "plugin id already registered"});
+        return unexpected(error{.code = error_code::plugin,
+                                .message = "plugin id already registered"});
     id value = s.next++;
     entry e{};
     e.value = value;
@@ -88,10 +88,10 @@ inline auto find(state& s, const std::string& name) -> entry*
 inline auto validate_abi(const shell_plugin_descriptor* desc) -> result<void>
 {
     if (desc == nullptr)
-        return std::unexpected(
+        return unexpected(
             error{.code = error_code::plugin, .message = "null descriptor"});
     if (desc->abi_version != SHELL_PLUGIN_ABI_VERSION)
-        return std::unexpected(
+        return unexpected(
             error{.code = error_code::plugin, .message = "ABI version mismatch"});
     return {};
 }

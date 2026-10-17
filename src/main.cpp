@@ -3,6 +3,7 @@
 // Header-only shell framework: builds backend::wayland + engine::state and
 // runs a Flutter app.
 #include <cstdio>
+#include <filesystem>
 #include <getopt.h>
 #include <string>
 #include <thread>
@@ -24,6 +25,7 @@ struct options
 {
     std::string assets;
     std::string icu;
+    std::string aot_lib;
     std::string renderer{"gl"}; // "gl" | "software"
     bool test_texture{};
     bool test_input{};
@@ -31,15 +33,19 @@ struct options
 
 void print_usage(const char* prog)
 {
-    std::fprintf(stderr,
-                 "usage: %s [options]\n"
-                 "  --assets P       Flutter asset directory (required)\n"
-                 "  --icu P          icudtl.dat path (default <assets>/icudtl.dat)\n"
-                 "  --renderer R     gl | software (default gl)\n"
-                 "  --test-texture   run a demo external-texture producer\n"
-                 "  --test-input     drive a scripted sequence of key events to exercise input\n"
-                 "  --help           show this help\n",
-                 prog);
+    std::fprintf(
+        stderr,
+        "usage: %s [options]\n"
+        "  --assets P       Flutter asset directory (required)\n"
+        "  --icu P          icudtl.dat path (default <assets>/icudtl.dat)\n"
+        "  --aot-lib P      release AOT snapshot (libapp.so); runs JIT against\n"
+        "                   <assets>/kernel_blob.bin if omitted and no sibling\n"
+        "                   lib/libapp.so is found next to <assets>\n"
+        "  --renderer R     gl | software (default gl)\n"
+        "  --test-texture   run a demo external-texture producer\n"
+        "  --test-input     drive a scripted sequence of key events to exercise input\n"
+        "  --help           show this help\n",
+        prog);
 }
 
 options parse_args(int argc, char** argv)
@@ -47,6 +53,7 @@ options parse_args(int argc, char** argv)
     static const option kLong[] = {
         {"assets", required_argument, nullptr, 'a'},
         {"icu", required_argument, nullptr, 'i'},
+        {"aot-lib", required_argument, nullptr, 'A'},
         {"renderer", required_argument, nullptr, 'r'},
         {"test-texture", no_argument, nullptr, 't'},
         {"test-input", no_argument, nullptr, 'x'},
@@ -64,6 +71,9 @@ options parse_args(int argc, char** argv)
             break;
         case 'i':
             out.icu = optarg;
+            break;
+        case 'A':
+            out.aot_lib = optarg;
             break;
         case 'r':
             out.renderer = optarg;
@@ -123,19 +133,58 @@ void run_input_test(shell::engine::state* e, bool* running)
 {
     // (evdev code, label): cover letters, digits, punctuation, editing, nav.
     static const std::pair<std::uint32_t, const char*> kKeys[] = {
-        {30, "a"}, {48, "b"}, {46, "c"}, {32, "d"}, {18, "e"}, {33, "f"},
-        {34, "g"}, {35, "h"}, {23, "i"}, {36, "j"}, {37, "k"}, {38, "l"},
-        {50, "m"}, {49, "n"}, {24, "o"}, {25, "p"}, {16, "q"}, {19, "r"},
-        {31, "s"}, {20, "t"}, {22, "u"}, {47, "v"}, {17, "w"}, {45, "x"},
-        {21, "y"}, {44, "z"},
-        {2, "1"}, {3, "2"}, {4, "3"}, {5, "4"}, {6, "5"}, {7, "6"},
-        {8, "7"}, {9, "8"}, {10, "9"}, {11, "0"},
+        {30, "a"},
+        {48, "b"},
+        {46, "c"},
+        {32, "d"},
+        {18, "e"},
+        {33, "f"},
+        {34, "g"},
+        {35, "h"},
+        {23, "i"},
+        {36, "j"},
+        {37, "k"},
+        {38, "l"},
+        {50, "m"},
+        {49, "n"},
+        {24, "o"},
+        {25, "p"},
+        {16, "q"},
+        {19, "r"},
+        {31, "s"},
+        {20, "t"},
+        {22, "u"},
+        {47, "v"},
+        {17, "w"},
+        {45, "x"},
+        {21, "y"},
+        {44, "z"},
+        {2, "1"},
+        {3, "2"},
+        {4, "3"},
+        {5, "4"},
+        {6, "5"},
+        {7, "6"},
+        {8, "7"},
+        {9, "8"},
+        {10, "9"},
+        {11, "0"},
         // Navigation tested while the field is still connected (before Enter
         // performs the field action and unfocuses it).
-        {103, "up"}, {108, "down"}, {105, "left"}, {106, "right"},
-        {102, "home"}, {107, "end"}, {104, "pageup"}, {109, "pagedown"},
-        {110, "insert"}, {111, "delete"},
-        {57, "space"}, {14, "backspace"}, {28, "enter"}, {15, "tab"},
+        {103, "up"},
+        {108, "down"},
+        {105, "left"},
+        {106, "right"},
+        {102, "home"},
+        {107, "end"},
+        {104, "pageup"},
+        {109, "pagedown"},
+        {110, "insert"},
+        {111, "delete"},
+        {57, "space"},
+        {14, "backspace"},
+        {28, "enter"},
+        {15, "tab"},
     };
     // Let the app finish booting and the text field focus.
     std::this_thread::sleep_for(std::chrono::seconds(6));
@@ -155,10 +204,10 @@ void run_input_test(shell::engine::state* e, bool* running)
     std::fprintf(stderr, "[test-input] repeat test: %d down-events of 'x'\n", kRepeats);
     for (int i = 0; i < kRepeats; ++i)
     {
-        shell::engine::queue_key(*e, 45, true);  // KEY_X down (a repeat)
+        shell::engine::queue_key(*e, 45, true); // KEY_X down (a repeat)
         std::this_thread::sleep_for(std::chrono::milliseconds(25));
     }
-    shell::engine::queue_key(*e, 45, false);       // release
+    shell::engine::queue_key(*e, 45, false); // release
     std::fprintf(stderr, "[test-input] queued %zu key sequences + %d repeats\n",
                  sizeof(kKeys) / sizeof(kKeys[0]), kRepeats);
     *running = false;
@@ -175,6 +224,26 @@ int main(int argc, char** argv)
     }
     if (opts.icu.empty())
         opts.icu = opts.assets + "/icudtl.dat";
+    if (opts.aot_lib.empty())
+    {
+        // Two conventions in the wild: flutter-pi/ardera-style gen_snapshot
+        // writes app.so straight into the assets dir; Flutter's own
+        // `release_bundle_linux-<arch>_assets` target instead lays out
+        // <out>/flutter_assets/ next to a sibling <out>/lib/libapp.so.
+        auto assets_path = std::filesystem::path(opts.assets);
+        auto candidates = {
+            assets_path / "app.so",
+            assets_path.parent_path() / "lib" / "libapp.so",
+        };
+        for (const auto& candidate : candidates)
+        {
+            if (std::filesystem::exists(candidate))
+            {
+                opts.aot_lib = candidate.string();
+                break;
+            }
+        }
+    }
 
     // The engine (declared first so backend callbacks can capture it).
     shell::engine::state engine;
@@ -183,8 +252,10 @@ int main(int argc, char** argv)
         rtype = shell::renderer::type::software;
     else if (opts.renderer == "gl")
         rtype = shell::renderer::type::gl;
-    engine.cfg = shell::engine::config{
-        .assets = opts.assets, .icu_data = opts.icu, .renderer = rtype};
+    engine.cfg = shell::engine::config{.assets = opts.assets,
+                                       .icu_data = opts.icu,
+                                       .aot_library = opts.aot_lib,
+                                       .renderer = rtype};
 
     shell::backend::output out{};
 

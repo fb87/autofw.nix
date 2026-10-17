@@ -1,6 +1,6 @@
 # shell
 
-`shell` is a small, header-only C++23 framework for building extensible
+`shell` is a small, header-only C++20 framework for building extensible
 Flutter-based embedded meta-applications such as automotive HMIs and kiosks.
 
 Core principles:
@@ -53,6 +53,7 @@ Flutter-side: `flutter/` holds the framework widgets; a runnable gallery lives i
 # build the Flutter gallery assets, then run
 (cd examples/gallery && flutter build bundle --target-platform linux-x64)
 ./result-shell/bin/shell_app --assets=examples/gallery/build/flutter_assets ...
+```
 
 ## Run the gallery with nix run
 
@@ -60,4 +61,37 @@ Flutter-side: `flutter/` holds the framework widgets; a runnable gallery lives i
 nix run .#gallery
 ```
 
+## Release builds (AOT, cross-compiled to arm64)
+
+Develop on x86_64, cross-compile the native shell and cross-generate an AOT
+snapshot for arm64, no target-device build step and no emulation required:
+
+```sh
+# 1. native shell_app, cross-compiled to aarch64 (true Nix cross, no emulation)
+nix build .#shell-aarch64-release -o result-shell-release
+
+# 2. release-mode engine for arm64 (AOT-capable; see flake.nix's
+#    arderaReleaseEnginePin comment for why this isn't Google's own embedder.zip)
+nix build .#flutter-engine-release-cross-aarch64 -o result-engine-release
+
+# 3. release Flutter asset bundle + app.so, built with a version-matched
+#    standalone toolchain (see examples/gallery/scripts/)
+cd examples/gallery
+./scripts/fetch-release-toolchain.sh
+./scripts/build-release-arm64.sh
 ```
+
+Copy `result-shell-release/bin/shell_app`, `result-engine-release/lib/libflutter_engine.so`
++ `result-engine-release/share/icudtl.dat`, and
+`examples/gallery/build/release-arm64/flutter_assets/` (step 3) to the arm64
+target, then:
+
+```sh
+./shell_app --assets=flutter_assets --icu=icudtl.dat --renderer=gl
+```
+
+`--aot-lib` doesn't need to be passed explicitly: `shell_app` auto-detects the
+`app.so` that `build-release-arm64.sh` places inside `flutter_assets/`.
+
+See `DEVELOPMENT.md` for why this needs a separate (pinned) Flutter SDK and
+engine build rather than the debug/JIT toolchain the rest of this README uses.

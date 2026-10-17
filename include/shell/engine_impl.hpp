@@ -174,8 +174,8 @@ inline auto stop_runner(state& s) -> void
 inline auto register_texture(state& s, texture::id id) -> result<void>;
 inline auto unregister_texture(state& s, texture::id id) -> result<void>;
 inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,
-                               std::uint32_t h,
-                               std::span<const std::uint8_t> rgba) -> bool;
+                               std::uint32_t h, std::span<const std::uint8_t> rgba)
+    -> bool;
 
 inline auto init(state& s) -> result<void>
 {
@@ -199,8 +199,7 @@ inline auto init(state& s) -> result<void>
         s.gl_ctx = egl::create_context(dpy, cfg, EGL_NO_CONTEXT);
         if (s.gl_ctx == EGL_NO_CONTEXT)
         {
-            return std::unexpected(
-                error{.code = error_code::egl, .message = "gl context"});
+            return unexpected(error{.code = error_code::egl, .message = "gl context"});
         }
         s.resource_ctx = egl::create_context(dpy, cfg, s.gl_ctx);
         s.upload_ctx = egl::create_context(dpy, cfg, s.gl_ctx);
@@ -236,10 +235,35 @@ inline auto init(state& s) -> result<void>
     char* asset_buf = strdup(assets.c_str());
     char* icu_buf = strdup(icu.c_str());
 
+    // A non-empty aot_library switches the engine from JIT (kernel_blob.bin
+    // in `assets`) to running a release-mode AOT snapshot.
+    std::string aot_path(s.cfg.aot_library);
+    if (!aot_path.empty())
+    {
+        FlutterEngineAOTDataSource aot_source = {};
+        aot_source.type = kFlutterEngineAOTDataSourceTypeElfPath;
+        aot_source.elf_path = aot_path.c_str();
+        if (FlutterEngineCreateAOTData(&aot_source, &s.aot_data) != kSuccess)
+        {
+            std::free(asset_buf);
+            std::free(icu_buf);
+            stop_runner(s);
+            return unexpected(
+                error{.code = error_code::flutter,
+                      .message = "failed to load AOT snapshot: " + aot_path});
+        }
+        log::info("AOT mode: " + aot_path);
+    }
+    else
+    {
+        log::info("JIT mode");
+    }
+
     FlutterProjectArgs args = {};
     args.struct_size = sizeof(args);
     args.assets_path = asset_buf;
     args.icu_data_path = icu_buf;
+    args.aot_data = s.aot_data;
     args.vsync_callback = detail::vsync_request;
     args.log_message_callback = detail::log_message;
     args.platform_message_callback = detail::on_platform_message;
@@ -252,9 +276,10 @@ inline auto init(state& s) -> result<void>
     {
         std::free(asset_buf);
         std::free(icu_buf);
+        if (s.aot_data)
+            FlutterEngineCollectAOTData(s.aot_data);
         stop_runner(s);
-        return std::unexpected(
-            error{.code = error_code::flutter, .message = "init failed"});
+        return unexpected(error{.code = error_code::flutter, .message = "init failed"});
     }
     s.fl = fl;
     std::free(asset_buf);
@@ -262,8 +287,7 @@ inline auto init(state& s) -> result<void>
     if (FlutterEngineRunInitialized(fl) != kSuccess)
     {
         stop_runner(s);
-        return std::unexpected(
-            error{.code = error_code::flutter, .message = "run failed"});
+        return unexpected(error{.code = error_code::flutter, .message = "run failed"});
     }
 
     // Gallery channels.
@@ -276,56 +300,62 @@ inline auto init(state& s) -> result<void>
     //                 that Flutter composites (GL builds only).
     channel::register_channel(
         s.channels, "shell/demo",
-        [](const std::string& method, std::span<const std::uint8_t>)
-            -> result<std::vector<std::uint8_t>>
+        [](const std::string& method,
+           std::span<const std::uint8_t>) -> result<std::vector<std::uint8_t>>
         {
-            if (method == "echo") return codec::encode_string("pong");
-            if (method == "ping") return codec::encode_string("pong");
-            return std::unexpected(
+            if (method == "echo")
+                return codec::encode_string("pong");
+            if (method == "ping")
+                return codec::encode_string("pong");
+            return unexpected(
                 error{.code = error_code::plugin, .message = "unknown demo method"});
         });
 
     channel::register_channel(
         s.channels, "shell/calc",
-        [](const std::string& method, std::span<const std::uint8_t> args)
-            -> result<std::vector<std::uint8_t>>
+        [](const std::string& method,
+           std::span<const std::uint8_t> args) -> result<std::vector<std::uint8_t>>
         {
             std::int64_t a = 0, b = 0;
             int idx = 0;
-            bool ok = codec::foreach_list_item(
-                args, [&](std::span<const std::uint8_t> item)
-                {
-                    std::int64_t v = 0;
-                    if (codec::decode_int64(item, v))
-                    {
-                        if (idx == 0) a = v;
-                        else if (idx == 1) b = v;
-                        ++idx;
-                    }
-                });
+            bool ok = codec::foreach_list_item(args,
+                                               [&](std::span<const std::uint8_t> item)
+                                               {
+                                                   std::int64_t v = 0;
+                                                   if (codec::decode_int64(item, v))
+                                                   {
+                                                       if (idx == 0)
+                                                           a = v;
+                                                       else if (idx == 1)
+                                                           b = v;
+                                                       ++idx;
+                                                   }
+                                               });
             if (!ok || idx < 2)
-                return std::unexpected(error{.code = error_code::plugin,
-                                             .message = "calc: need [a, b]"});
-            if (method == "add") return codec::encode_int64(a + b);
-            if (method == "mul") return codec::encode_int64(a * b);
-            return std::unexpected(
+                return unexpected(
+                    error{.code = error_code::plugin, .message = "calc: need [a, b]"});
+            if (method == "add")
+                return codec::encode_int64(a + b);
+            if (method == "mul")
+                return codec::encode_int64(a * b);
+            return unexpected(
                 error{.code = error_code::plugin, .message = "calc: unknown method"});
         });
 
     channel::register_channel(
         s.channels, "shell/texture",
-        [&s](const std::string& method, std::span<const std::uint8_t> args)
-            -> result<std::vector<std::uint8_t>>
+        [&s](const std::string& method,
+             std::span<const std::uint8_t> args) -> result<std::vector<std::uint8_t>>
         {
             std::int64_t id = 0;
             if (method == "register")
             {
                 if (!codec::decode_int64(args, id))
-                    return std::unexpected(error{.code = error_code::plugin,
-                                                 .message = "texture: register needs id"});
+                    return unexpected(error{.code = error_code::plugin,
+                                            .message = "texture: register needs id"});
                 auto r = register_texture(s, static_cast<texture::id>(id));
                 if (!r)
-                    return std::unexpected(r.error());
+                    return unexpected(r.error());
                 return codec::encode_bool(true);
             }
             if (method == "unregister")
@@ -341,14 +371,18 @@ inline auto init(state& s) -> result<void>
                 std::span<const std::uint8_t> rgba;
                 int idx = 0;
                 codec::foreach_list_item(
-                    args, [&](std::span<const std::uint8_t> item)
+                    args,
+                    [&](std::span<const std::uint8_t> item)
                     {
                         std::int64_t v = 0;
                         if (codec::decode_int64(item, v))
                         {
-                            if (idx == 0) id = v;
-                            else if (idx == 1) w = v;
-                            else if (idx == 2) h = v;
+                            if (idx == 0)
+                                id = v;
+                            else if (idx == 1)
+                                w = v;
+                            else if (idx == 2)
+                                h = v;
                             ++idx;
                         }
                         else if (codec::decode_byte_array(item, rgba))
@@ -357,18 +391,19 @@ inline auto init(state& s) -> result<void>
                         }
                     });
                 if (idx < 4 || w <= 0 || h <= 0 || rgba.size() < 4)
-                    return std::unexpected(error{.code = error_code::plugin,
-                                                 .message = "texture: bad pushFrame args"});
+                    return unexpected(error{.code = error_code::plugin,
+                                            .message = "texture: bad pushFrame args"});
                 bool ok = push_texture_frame(s, static_cast<texture::id>(id),
                                              static_cast<std::uint32_t>(w),
                                              static_cast<std::uint32_t>(h), rgba);
                 if (!ok)
-                    return std::unexpected(error{.code = error_code::texture,
-                                                 .message = "texture: push failed (GL only)"});
+                    return unexpected(
+                        error{.code = error_code::texture,
+                              .message = "texture: push failed (GL only)"});
                 return codec::encode_bool(true);
             }
-            return std::unexpected(
-                error{.code = error_code::plugin, .message = "texture: unknown method"});
+            return unexpected(error{.code = error_code::plugin,
+                                    .message = "texture: unknown method"});
         });
 
     FlutterEngineDisplay display = {};
@@ -396,6 +431,8 @@ inline auto destroy(state& s) -> void
 {
     if (s.fl)
         FlutterEngineShutdown(s.fl);
+    if (s.aot_data)
+        FlutterEngineCollectAOTData(s.aot_data);
     stop_runner(s);
 }
 
@@ -492,10 +529,13 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
         key.type = down ? kFlutterKeyEventTypeDown : kFlutterKeyEventTypeUp;
         key.physical = 0x00070000ull | payload->physical_hid; // PhysicalKeyboardKey
         key.logical = payload->logical;
-        key.character = (down && !payload->character.empty()) ? payload->character.c_str() : nullptr;
+        key.character = (down && !payload->character.empty())
+                            ? payload->character.c_str()
+                            : nullptr;
         key.synthesized = false;
         key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
-        FlutterEngineResult kr = FlutterEngineSendKeyEvent(s.fl, &key, nullptr, nullptr);
+        FlutterEngineResult kr =
+            FlutterEngineSendKeyEvent(s.fl, &key, nullptr, nullptr);
         std::fprintf(stderr, "[kr] rc=%d\n", (int)kr);
 
         // Drive host-side IME under the state lock, building host->framework
@@ -608,8 +648,7 @@ inline auto register_texture(state& s, texture::id id) -> result<void>
     if (FlutterEngineRegisterExternalTexture(s.fl, id) != kSuccess)
     {
         texture::unregister_id(s.textures, id);
-        return std::unexpected(
-            error{.code = error_code::texture, .message = "register"});
+        return unexpected(error{.code = error_code::texture, .message = "register"});
     }
     return {};
 }
@@ -700,7 +739,8 @@ void on_platform_message(const FlutterPlatformMessage* m, void* d)
         // We must always answer (even a bare ACK keeps the connection alive).
         if (resp.empty())
             resp = textinput::ack();
-        FlutterEngineSendPlatformMessageResponse(e->fl, m->response_handle, resp.data(), resp.size());
+        FlutterEngineSendPlatformMessageResponse(e->fl, m->response_handle, resp.data(),
+                                                 resp.size());
         return;
     }
     // Route named platform-message channels through the channel registry. The
@@ -711,9 +751,9 @@ void on_platform_message(const FlutterPlatformMessage* m, void* d)
     std::vector<std::uint8_t> response;
     if (!value.empty())
         response = codec::success_envelope(value);
-    FlutterEngineSendPlatformMessageResponse(e->fl, m->response_handle,
-                                             response.empty() ? nullptr : response.data(),
-                                             response.size());
+    FlutterEngineSendPlatformMessageResponse(
+        e->fl, m->response_handle, response.empty() ? nullptr : response.data(),
+        response.size());
 }
 } // namespace detail
 
