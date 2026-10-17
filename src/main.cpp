@@ -26,6 +26,7 @@ struct options
     std::string assets;
     std::string icu;
     std::string aot_lib;
+    std::string drm_device{"/dev/dri/card0"}; // drm backend only
     std::string renderer{"gl"}; // "gl" | "software"
     bool test_texture{};
     bool test_input{};
@@ -41,6 +42,9 @@ void print_usage(const char* prog)
         "  --aot-lib P      release AOT snapshot (libapp.so); runs JIT against\n"
         "                   <assets>/kernel_blob.bin if omitted and no sibling\n"
         "                   lib/libapp.so is found next to <assets>\n"
+        "  --drm-device P   DRM device node (default /dev/dri/card0; drm backend\n"
+        "                   only -- a machine with multiple GPUs/cards may need\n"
+        "                   a different one, e.g. --drm-device=/dev/dri/card1)\n"
         "  --renderer R     gl | software (default gl)\n"
         "  --test-texture   run a demo external-texture producer\n"
         "  --test-input     drive a scripted sequence of key events to exercise input\n"
@@ -54,6 +58,7 @@ options parse_args(int argc, char** argv)
         {"assets", required_argument, nullptr, 'a'},
         {"icu", required_argument, nullptr, 'i'},
         {"aot-lib", required_argument, nullptr, 'A'},
+        {"drm-device", required_argument, nullptr, 'D'},
         {"renderer", required_argument, nullptr, 'r'},
         {"test-texture", no_argument, nullptr, 't'},
         {"test-input", no_argument, nullptr, 'x'},
@@ -74,6 +79,9 @@ options parse_args(int argc, char** argv)
             break;
         case 'A':
             out.aot_lib = optarg;
+            break;
+        case 'D':
+            out.drm_device = optarg;
             break;
         case 'r':
             out.renderer = optarg;
@@ -299,10 +307,20 @@ int main(int argc, char** argv)
     backend.cb.on_close = [&] { shell::engine::on_close(engine); };
     backend.cb.on_poll = [&] { shell::engine::drain_keys(engine); };
 #else
-    shell::backend::drm::config cfg{.device = "/dev/dri/card0"};
+    shell::backend::drm::config cfg{.device = opts.drm_device};
     shell::backend::drm::state backend = shell::backend::drm::create(cfg);
     if (auto err = shell::backend::drm::connect(backend); !err)
-        return fail("drm connect failed", err.error());
+    {
+        std::string msg = "drm connect failed (device=" + opts.drm_device + ")";
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator("/dev/dri", ec))
+        {
+            auto path = entry.path();
+            if (path.filename().string().rfind("card", 0) == 0 && path != opts.drm_device)
+                msg += "; other card found: " + path.string() + " (try --drm-device)";
+        }
+        return fail(msg, err.error());
+    }
     out = shell::backend::drm::output::take(backend);
     backend.cb.on_vsync = [&] { shell::engine::on_vsync(engine); };
     backend.cb.on_resize = [&](std::uint32_t w, std::uint32_t h)
