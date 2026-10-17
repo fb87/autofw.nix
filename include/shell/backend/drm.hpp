@@ -1,8 +1,12 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include <EGL/egl.h>
 #include <poll.h>
@@ -87,6 +91,55 @@ struct state
 
     callbacks cb;
 };
+
+// ---- device discovery -------------------------------------------------------
+// Probes every /dev/dri/card* node for a connected connector with at least
+// one mode -- i.e. the one actually driving a display -- and returns the
+// first match. A machine with multiple GPUs (common with hybrid graphics, or
+// a discrete GPU alongside an iGPU) may have the display wired to a card
+// other than card0, which is otherwise an unexplained connect failure.
+inline auto find_connected_device() -> result<std::string>
+{
+    std::vector<std::string> candidates;
+    std::error_code ec;
+    for (const auto& entry : std::filesystem::directory_iterator("/dev/dri", ec))
+    {
+        if (entry.path().filename().string().rfind("card", 0) == 0)
+            candidates.push_back(entry.path().string());
+    }
+    std::sort(candidates.begin(), candidates.end());
+
+    for (const auto& path : candidates)
+    {
+        int fd = open(path.c_str(), O_RDWR | O_CLOEXEC);
+        if (fd < 0)
+            continue;
+        drmModeResPtr res = drmModeGetResources(fd);
+        bool connected = false;
+        if (res)
+        {
+            for (int i = 0; i < res->count_connectors && !connected; ++i)
+            {
+                drmModeConnector* conn = drmModeGetConnector(fd, res->connectors[i]);
+                if (conn)
+                {
+                    if (conn->connection == DRM_MODE_CONNECTED && conn->count_modes > 0)
+                        connected = true;
+                    drmModeFreeConnector(conn);
+                }
+            }
+            drmModeFreeResources(res);
+        }
+        close(fd);
+        if (connected)
+            return path;
+    }
+    return unexpected(error{.code = error_code::drm,
+                            .message = candidates.empty()
+                                           ? "no /dev/dri/card* device found"
+                                           : "no connected display on any "
+                                             "/dev/dri/card* device"});
+}
 
 // ---- helpers ---------------------------------------------------------------
 inline auto open_device(state& s) -> result<void>
