@@ -237,10 +237,19 @@ int main(int argc, char** argv)
         };
         for (const auto& candidate : candidates)
         {
-            if (std::filesystem::exists(candidate))
+            if (!std::filesystem::exists(candidate))
+                continue;
+            if (opts.aot_lib.empty())
             {
                 opts.aot_lib = candidate.string();
-                break;
+            }
+            else
+            {
+                // Both conventions present, almost always a stale leftover
+                // from an earlier build with the other toolchain. Make the
+                // ignored one visible instead of silently picking one.
+                std::fprintf(stderr, "warning: ignoring %s (using %s instead)\n",
+                             candidate.string().c_str(), opts.aot_lib.c_str());
             }
         }
     }
