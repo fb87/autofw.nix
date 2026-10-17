@@ -266,17 +266,26 @@ int main(int argc, char** argv)
                                        .aot_library = opts.aot_lib,
                                        .renderer = rtype};
 
+    // Every early-exit below reports *why*: a bare `return 1` with no log
+    // line previously left failures (e.g. no Wayland compositor, DRM device
+    // already owned, AOT snapshot mismatch) completely silent.
+    auto fail = [](std::string_view what, const shell::error& err) -> int
+    {
+        shell::log::info(std::string(what) + ": " + err.message);
+        return 1;
+    };
+
     shell::backend::output out{};
 
 #ifdef SHELL_BACKEND_WAYLAND
     shell::backend::wayland::config cfg{.display = {}, .width = 1280, .height = 720};
     shell::backend::wayland::state backend = shell::backend::wayland::create(cfg);
     if (auto err = shell::backend::wayland::connect(backend); !err)
-        return 1;
+        return fail("wayland connect failed", err.error());
     if (auto err = shell::backend::wayland::setup_egl(backend); !err)
-        return 1;
+        return fail("wayland setup_egl failed", err.error());
     if (auto err = shell::backend::wayland::setup_surface(backend); !err)
-        return 1;
+        return fail("wayland setup_surface failed", err.error());
     out = shell::backend::wayland::output::take(backend);
     backend.cb.on_vsync = [&] { shell::engine::on_vsync(engine); };
     backend.cb.on_pointer = [&](const shell::input::pointer_event& ev)
@@ -293,10 +302,7 @@ int main(int argc, char** argv)
     shell::backend::drm::config cfg{.device = "/dev/dri/card0"};
     shell::backend::drm::state backend = shell::backend::drm::create(cfg);
     if (auto err = shell::backend::drm::connect(backend); !err)
-    {
-        shell::log::info("drm connect failed");
-        return 1;
-    }
+        return fail("drm connect failed", err.error());
     out = shell::backend::drm::output::take(backend);
     backend.cb.on_vsync = [&] { shell::engine::on_vsync(engine); };
     backend.cb.on_resize = [&](std::uint32_t w, std::uint32_t h)
@@ -307,10 +313,7 @@ int main(int argc, char** argv)
     engine.out = &out;
 
     if (auto err = shell::engine::init(engine); !err)
-    {
-        shell::log::info("engine init failed");
-        return 1;
-    }
+        return fail("engine init failed", err.error());
 
     std::thread producer;
     bool producer_running = false;
