@@ -1,10 +1,12 @@
 // engine_impl.hpp -- implementation of the shell Flutter engine wrapper.
 // Included at the bottom of engine.hpp; must not include engine.hpp back.
 
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <functional>
 #include <span>
+#include <vector>
 
 namespace shell::engine
 {
@@ -176,6 +178,7 @@ inline auto unregister_texture(state& s, texture::id id) -> result<void>;
 inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,
                                std::uint32_t h, std::span<const std::uint8_t> rgba)
     -> bool;
+inline auto encode_layers_snapshot(state& s) -> std::vector<std::uint8_t>;
 
 inline auto init(state& s) -> result<void>
 {
@@ -406,6 +409,20 @@ inline auto init(state& s) -> result<void>
                                     .message = "texture: unknown method"});
         });
 
+    // 'shell/layers' — Dart pulls the current z-sorted layer snapshot on
+    // startup ("list"); the engine separately pushes "update" whenever
+    // add_layer/remove_layer/set_layer_* change anything (see push_layers).
+    channel::register_channel(
+        s.channels, "shell/layers",
+        [&s](const std::string& method,
+             std::span<const std::uint8_t>) -> result<std::vector<std::uint8_t>>
+        {
+            if (method == "list")
+                return encode_layers_snapshot(s);
+            return unexpected(
+                error{.code = error_code::plugin, .message = "layers: unknown method"});
+        });
+
     FlutterEngineDisplay display = {};
     display.struct_size = sizeof(display);
     display.single_display = true;
@@ -434,6 +451,129 @@ inline auto destroy(state& s) -> void
     if (s.aot_data)
         FlutterEngineCollectAOTData(s.aot_data);
     stop_runner(s);
+}
+
+// --- stage / layer -----------------------------------------------------------
+inline auto encode_layer(const layer::state& l) -> std::vector<std::uint8_t>
+{
+    std::vector<std::vector<std::uint8_t>> fields;
+    fields.push_back(codec::encode_int64(static_cast<std::int64_t>(l.value)));
+    fields.push_back(codec::encode_int64(static_cast<std::int64_t>(l.stage)));
+    fields.push_back(codec::encode_int64(static_cast<std::int64_t>(l.kind)));
+    // Geometry/opacity carried as int64 scaled by 1000 (3-decimal precision):
+    // this project's codec has no float64 encoder yet, and encode_int64 is
+    // already proven to round-trip through Dart's real StandardMethodCodec
+    // (the shell/calc demo), so this avoids introducing an untested encoder.
+    fields.push_back(
+        codec::encode_int64(static_cast<std::int64_t>(l.bounds.x * 1000)));
+    fields.push_back(
+        codec::encode_int64(static_cast<std::int64_t>(l.bounds.y * 1000)));
+    fields.push_back(
+        codec::encode_int64(static_cast<std::int64_t>(l.bounds.width * 1000)));
+    fields.push_back(
+        codec::encode_int64(static_cast<std::int64_t>(l.bounds.height * 1000)));
+    fields.push_back(codec::encode_int64(static_cast<std::int64_t>(l.opacity * 1000)));
+    fields.push_back(codec::encode_bool(l.visible));
+    fields.push_back(codec::encode_int64(layer::z_of(l.kind)));
+    return codec::encode_list(fields);
+}
+
+inline auto encode_layers_snapshot(state& s) -> std::vector<std::uint8_t>
+{
+    std::vector<const layer::state*> sorted;
+    sorted.reserve(s.layers.size());
+    for (const auto& [id, l] : s.layers)
+        sorted.push_back(&l);
+    std::sort(sorted.begin(), sorted.end(), [](const auto* a, const auto* b)
+             { return layer::z_of(a->kind) < layer::z_of(b->kind); });
+
+    std::vector<std::vector<std::uint8_t>> items;
+    items.reserve(sorted.size());
+    for (const auto* l : sorted)
+        items.push_back(encode_layer(*l));
+    return codec::encode_list(items);
+}
+
+// Pushes the full z-sorted layer snapshot to Dart on the 'shell/layers'
+// channel, method "update". Fire-and-forget (no response_handle), mirroring
+// the existing 'flutter/textinput' push in send_key below. Marshaled onto
+// the runner thread like every other FlutterEngineSend* call here -- this
+// is called from whichever thread owns layer mutations (e.g. the
+// --test-layers driver thread), not the platform thread.
+inline auto push_layers(state& s) -> void
+{
+    // Dart's MethodChannel.setMethodCallHandler expects a full method-call
+    // envelope ([String method][value args]), not a bare encoded value --
+    // unlike the "list" reply above, which channel::dispatch wraps in a
+    // success envelope for a request/reply. Build that here by hand since
+    // this is a C++ -> Dart push with no request to reply to.
+    auto method = codec::encode_string("update");
+    auto args = encode_layers_snapshot(s);
+    auto payload = std::make_shared<std::vector<std::uint8_t>>();
+    payload->reserve(method.size() + args.size());
+    payload->insert(payload->end(), method.begin(), method.end());
+    payload->insert(payload->end(), args.begin(), args.end());
+    auto deliver = [&s, payload]
+    {
+        const std::string kChan = "shell/layers";
+        FlutterPlatformMessage msg = {};
+        msg.struct_size = sizeof(msg);
+        msg.channel = kChan.c_str();
+        msg.message = payload->data();
+        msg.message_size = payload->size();
+        FlutterEngineSendPlatformMessage(s.fl, &msg);
+    };
+    {
+        std::lock_guard lock(s.runner_mutex);
+        s.runner_q.push_back(deliver);
+        s.runner_cv.notify_one();
+    }
+}
+
+inline auto add_layer(state& s, const layer::state& l) -> bool
+{
+    bool ok = layer::add(s.layers, l);
+    if (ok)
+        push_layers(s);
+    return ok;
+}
+
+inline auto remove_layer(state& s, layer::id lid) -> bool
+{
+    bool ok = layer::remove(s.layers, lid);
+    if (ok)
+        push_layers(s);
+    return ok;
+}
+
+inline auto set_layer_visible(state& s, layer::id lid, bool visible) -> bool
+{
+    auto* l = layer::get(s.layers, lid);
+    if (!l)
+        return false;
+    layer::set_visible(*l, visible);
+    push_layers(s);
+    return true;
+}
+
+inline auto set_layer_opacity(state& s, layer::id lid, float opacity) -> bool
+{
+    auto* l = layer::get(s.layers, lid);
+    if (!l)
+        return false;
+    layer::set_opacity(*l, opacity);
+    push_layers(s);
+    return true;
+}
+
+inline auto set_layer_bounds(state& s, layer::id lid, layer::geometry bounds) -> bool
+{
+    auto* l = layer::get(s.layers, lid);
+    if (!l)
+        return false;
+    layer::set_bounds(*l, bounds);
+    push_layers(s);
+    return true;
 }
 
 // --- vsync / input -----------------------------------------------------------

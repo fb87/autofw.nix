@@ -366,6 +366,18 @@ inline auto encode_int32_list(std::span<const std::int64_t> items)
     return out;
 }
 
+// Wrap N already-encoded values as a StandardMethodCodec list.
+inline auto encode_list(std::span<const std::vector<std::uint8_t>> items)
+    -> std::vector<std::uint8_t>
+{
+    std::vector<std::uint8_t> out;
+    put_u8(out, kList);
+    put_size(out, static_cast<std::uint32_t>(items.size()));
+    for (const auto& item : items)
+        out.insert(out.end(), item.begin(), item.end());
+    return out;
+}
+
 inline auto encode_string_map(const std::string& key, const std::string& value)
     -> std::vector<std::uint8_t>
 {

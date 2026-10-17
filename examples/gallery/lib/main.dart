@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shell_flutter/layer_host.dart';
 
 import 'demos/buttons_panel.dart';
 import 'demos/calc_panel.dart';
@@ -113,7 +114,12 @@ class _GalleryHomeState extends State<GalleryHome> {
           ],
         ),
       ),
-      body: sel.panel,
+      body: Stack(
+        children: [
+          sel.panel,
+          const ShellLayerHost(),
+        ],
+      ),
     );
   }
 }

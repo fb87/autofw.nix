@@ -25,9 +25,11 @@
 #include <shell/error.hpp>
 #include <shell/input.hpp>
 #include <shell/keyboard.hpp>
+#include <shell/layer.hpp>
 #include <shell/log.hpp>
 #include <shell/renderer.hpp>
 #include <shell/result.hpp>
+#include <shell/stage.hpp>
 #include <shell/textinput.hpp>
 #include <shell/texture.hpp>
 
@@ -66,6 +68,8 @@ struct state
     keyboard::state kb;
     channel::state channels;
     textinput::state ti;
+    stage::registry stages;
+    layer::registry layers;
 
     std::mutex runner_mutex;
     std::condition_variable runner_cv;

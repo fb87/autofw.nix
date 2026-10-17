@@ -30,6 +30,7 @@ struct options
     std::string renderer{"gl"}; // "gl" | "software"
     bool test_texture{};
     bool test_input{};
+    bool test_layers{};
 };
 
 void print_usage(const char* prog)
@@ -48,6 +49,8 @@ void print_usage(const char* prog)
         "  --renderer R     gl | software (default gl)\n"
         "  --test-texture   run a demo external-texture producer\n"
         "  --test-input     drive a scripted sequence of key events to exercise input\n"
+        "  --test-layers    drive a scripted sequence of layer add/visibility/\n"
+        "                   opacity/remove changes to exercise the shell/layers channel\n"
         "  --help           show this help\n",
         prog);
 }
@@ -62,6 +65,7 @@ options parse_args(int argc, char** argv)
         {"renderer", required_argument, nullptr, 'r'},
         {"test-texture", no_argument, nullptr, 't'},
         {"test-input", no_argument, nullptr, 'x'},
+        {"test-layers", no_argument, nullptr, 'L'},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
@@ -91,6 +95,9 @@ options parse_args(int argc, char** argv)
             break;
         case 'x':
             out.test_input = true;
+            break;
+        case 'L':
+            out.test_layers = true;
             break;
         case 'h':
         default:
@@ -218,6 +225,60 @@ void run_input_test(shell::engine::state* e, bool* running)
     shell::engine::queue_key(*e, 45, false); // release
     std::fprintf(stderr, "[test-input] queued %zu key sequences + %d repeats\n",
                  sizeof(kKeys) / sizeof(kKeys[0]), kRepeats);
+    *running = false;
+}
+
+// Drive a scripted sequence of layer add/visibility/opacity/remove changes
+// straight through engine::add_layer/set_layer_*/remove_layer -- the shell/
+// layers channel Dart side; used as `--test-layers` for the GUI layer
+// compositing test.
+void run_layer_test(shell::engine::state* e, bool* running)
+{
+    // Let the app finish booting (its Dart side fetches the initial
+    // snapshot via shell/layers "list" in its own initState).
+    std::this_thread::sleep_for(std::chrono::seconds(3));
+
+    constexpr shell::stage::id kStageId = 1;
+    constexpr shell::layer::id kBackgroundId = 1;
+    constexpr shell::layer::id kApplicationId = 2;
+    constexpr shell::layer::id kOverlayId = 3;
+
+    shell::engine::add_layer(
+        *e, shell::layer::state{.value = kBackgroundId,
+                                .stage = kStageId,
+                                .kind = shell::layer::role::background,
+                                .bounds = {0, 0, 1280, 720}});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    shell::engine::add_layer(
+        *e, shell::layer::state{.value = kApplicationId,
+                                .stage = kStageId,
+                                .kind = shell::layer::role::application,
+                                .bounds = {40, 40, 400, 300}});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    shell::engine::add_layer(
+        *e, shell::layer::state{.value = kOverlayId,
+                                .stage = kStageId,
+                                .kind = shell::layer::role::overlay,
+                                .bounds = {480, 40, 300, 200}});
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    shell::engine::set_layer_visible(*e, kApplicationId, false);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    shell::engine::set_layer_visible(*e, kApplicationId, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    for (float opacity : {0.25F, 0.5F, 0.75F, 1.0F})
+    {
+        shell::engine::set_layer_opacity(*e, kOverlayId, opacity);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    }
+
+    shell::engine::remove_layer(*e, kBackgroundId);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+    std::fprintf(stderr, "[test-layers] add/visibility/opacity/remove sequence done\n");
     *running = false;
 }
 } // namespace
@@ -364,6 +425,14 @@ int main(int argc, char** argv)
         keytest = std::thread(run_input_test, &engine, &keytest_running);
     }
 
+    std::thread layertest;
+    bool layertest_running = false;
+    if (opts.test_layers)
+    {
+        layertest_running = true;
+        layertest = std::thread(run_layer_test, &engine, &layertest_running);
+    }
+
 #ifdef SHELL_BACKEND_WAYLAND
     shell::backend::wayland::run(backend);
 #else
@@ -380,6 +449,11 @@ int main(int argc, char** argv)
     {
         keytest_running = false;
         keytest.join();
+    }
+    if (layertest.joinable())
+    {
+        layertest_running = false;
+        layertest.join();
     }
     shell::engine::destroy(engine);
 #ifdef SHELL_BACKEND_WAYLAND
