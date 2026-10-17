@@ -103,6 +103,8 @@
               pkgs.libgbm
               pkgs.libffi
               pkgs.libxkbcommon
+              pkgs.libinput
+              pkgs.udev
               flutter-engine
             ];
             cmakeFlags = [
@@ -220,6 +222,8 @@
                 pkgsCrossAarch64.libgbm
                 pkgsCrossAarch64.libffi
                 pkgsCrossAarch64.libxkbcommon
+                pkgsCrossAarch64.libinput
+                pkgsCrossAarch64.udev
                 engineRoot
               ];
               cmakeFlags = [
@@ -275,6 +279,8 @@
             pkgs.libdrm
             pkgs.libffi
             pkgs.libxkbcommon
+            pkgs.libinput
+            pkgs.udev
             pkgs.flutter.unwrapped
           ];
         };

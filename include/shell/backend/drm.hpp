@@ -25,10 +25,15 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include <libinput.h>
+#include <libudev.h>
+#include <linux/input-event-codes.h>
+
 #include <shell/backend.hpp>
 #include <shell/egl.hpp>
 #include <shell/error.hpp>
 #include <shell/event.hpp>
+#include <shell/input.hpp>
 #include <shell/log.hpp>
 #include <shell/renderer.hpp>
 #include <shell/result.hpp>
@@ -45,13 +50,16 @@ struct config
     std::uint32_t height{};
 };
 
-// Callbacks the engine installs to drive frames/input (DRM has no built-in
-// input; vsync comes from page-filp timing).
+// Callbacks the engine installs to drive frames/input. Vsync comes from
+// page-flip timing; pointer/keyboard come from libinput (DRM has no
+// compositor of its own to supply either).
 struct callbacks
 {
     std::function<void()> on_vsync;
     std::function<void(std::uint32_t, std::uint32_t)> on_resize;
     std::function<void()> on_close;
+    std::function<void(const input::pointer_event&)> on_pointer;
+    std::function<void(std::uint32_t, bool)> on_key;
 };
 
 struct dumb_buf
@@ -75,6 +83,18 @@ struct state
     gbm_surface* gbm_surf{};
 
     egl::state egl;
+
+    udev* udev_ctx{};
+    libinput* li{};
+    double pointer_x{};
+    double pointer_y{};
+    std::uint32_t buttons{};
+    // Last known position per touch seat slot, for LIBINPUT_EVENT_TOUCH_UP
+    // (which carries no coordinates of its own). Single-touch-screen
+    // assumption: not a full multi-slot map, just the latest slot/position.
+    std::int32_t touch_slot{-1};
+    double touch_x{};
+    double touch_y{};
 
     std::uint32_t width{};
     std::uint32_t height{};
@@ -260,6 +280,180 @@ inline auto setup_egl(state& s) -> result<void>
 #endif
 }
 
+// ---- libinput (M18: real input source, not just the shape) -----------------
+namespace detail
+{
+inline int li_open_restricted(const char* path, int flags, void*)
+{
+    return open(path, flags);
+}
+inline void li_close_restricted(int fd, void*)
+{
+    close(fd);
+}
+inline const libinput_interface kLibinputInterface = {
+    .open_restricted = li_open_restricted,
+    .close_restricted = li_close_restricted,
+};
+
+inline auto button_mask(std::uint32_t button) -> std::uint32_t
+{
+    if (button == BTN_LEFT)
+        return 0x1;
+    if (button == BTN_RIGHT)
+        return 0x2;
+    if (button == BTN_MIDDLE)
+        return 0x4;
+    return 0;
+}
+} // namespace detail
+
+inline auto setup_libinput(state& s) -> result<void>
+{
+    s.udev_ctx = udev_new();
+    if (!s.udev_ctx)
+    {
+        return unexpected(error{.code = error_code::drm, .message = "udev_new"});
+    }
+    s.li = libinput_udev_create_context(&detail::kLibinputInterface, &s, s.udev_ctx);
+    if (!s.li)
+    {
+        return unexpected(
+            error{.code = error_code::drm, .message = "libinput_udev_create_context"});
+    }
+    if (libinput_udev_assign_seat(s.li, "seat0") != 0)
+    {
+        return unexpected(
+            error{.code = error_code::drm, .message = "libinput_udev_assign_seat"});
+    }
+    return {};
+}
+
+// Drains libinput's event queue, translating each event into the same
+// shell::input::pointer_event / evdev-keycode shapes backend::wayland
+// already feeds to engine::send_pointer/send_key.
+inline void dispatch_libinput(state& s)
+{
+    if (!s.li)
+        return;
+    libinput_dispatch(s.li);
+    libinput_event* ev;
+    while ((ev = libinput_get_event(s.li)) != nullptr)
+    {
+        switch (libinput_event_get_type(ev))
+        {
+        case LIBINPUT_EVENT_KEYBOARD_KEY:
+        {
+            auto* kev = libinput_event_get_keyboard_event(ev);
+            std::uint32_t code = libinput_event_keyboard_get_key(kev);
+            bool pressed =
+                libinput_event_keyboard_get_key_state(kev) == LIBINPUT_KEY_STATE_PRESSED;
+            if (s.cb.on_key)
+                s.cb.on_key(code, pressed);
+            break;
+        }
+        case LIBINPUT_EVENT_POINTER_MOTION:
+        {
+            auto* pev = libinput_event_get_pointer_event(ev);
+            s.pointer_x = std::clamp(s.pointer_x + libinput_event_pointer_get_dx(pev),
+                                     0.0, static_cast<double>(s.width));
+            s.pointer_y = std::clamp(s.pointer_y + libinput_event_pointer_get_dy(pev),
+                                     0.0, static_cast<double>(s.height));
+            if (s.cb.on_pointer)
+            {
+                s.cb.on_pointer(input::pointer_event{
+                    .phase = s.buttons ? input::pointer_phase::move
+                                      : input::pointer_phase::hover,
+                    .x = s.pointer_x,
+                    .y = s.pointer_y,
+                    .buttons = s.buttons});
+            }
+            break;
+        }
+        case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
+        {
+            auto* pev = libinput_event_get_pointer_event(ev);
+            s.pointer_x =
+                libinput_event_pointer_get_absolute_x_transformed(pev, s.width);
+            s.pointer_y =
+                libinput_event_pointer_get_absolute_y_transformed(pev, s.height);
+            if (s.cb.on_pointer)
+            {
+                s.cb.on_pointer(input::pointer_event{
+                    .phase = s.buttons ? input::pointer_phase::move
+                                      : input::pointer_phase::hover,
+                    .x = s.pointer_x,
+                    .y = s.pointer_y,
+                    .buttons = s.buttons});
+            }
+            break;
+        }
+        case LIBINPUT_EVENT_POINTER_BUTTON:
+        {
+            auto* pev = libinput_event_get_pointer_event(ev);
+            std::uint32_t mask = detail::button_mask(libinput_event_pointer_get_button(pev));
+            if (mask)
+            {
+                bool pressed = libinput_event_pointer_get_button_state(pev) ==
+                               LIBINPUT_BUTTON_STATE_PRESSED;
+                if (pressed)
+                    s.buttons |= mask;
+                else
+                    s.buttons &= ~mask;
+                if (s.cb.on_pointer)
+                {
+                    s.cb.on_pointer(input::pointer_event{
+                        .phase = pressed ? input::pointer_phase::down
+                                        : input::pointer_phase::up,
+                        .x = s.pointer_x,
+                        .y = s.pointer_y,
+                        .buttons = s.buttons});
+                }
+            }
+            break;
+        }
+        case LIBINPUT_EVENT_TOUCH_DOWN:
+        case LIBINPUT_EVENT_TOUCH_MOTION:
+        {
+            auto* tev = libinput_event_get_touch_event(ev);
+            s.touch_slot = libinput_event_touch_get_seat_slot(tev);
+            s.touch_x = libinput_event_touch_get_x_transformed(tev, s.width);
+            s.touch_y = libinput_event_touch_get_y_transformed(tev, s.height);
+            if (s.cb.on_pointer)
+            {
+                s.cb.on_pointer(input::pointer_event{
+                    .device = static_cast<std::uint32_t>(s.touch_slot),
+                    .phase = libinput_event_get_type(ev) == LIBINPUT_EVENT_TOUCH_DOWN
+                                 ? input::pointer_phase::down
+                                 : input::pointer_phase::move,
+                    .x = s.touch_x,
+                    .y = s.touch_y,
+                    .kind = input::device_type::touch});
+            }
+            break;
+        }
+        case LIBINPUT_EVENT_TOUCH_UP:
+        {
+            auto* tev = libinput_event_get_touch_event(ev);
+            if (s.cb.on_pointer)
+            {
+                s.cb.on_pointer(input::pointer_event{
+                    .device = static_cast<std::uint32_t>(
+                        libinput_event_touch_get_seat_slot(tev)),
+                    .phase = input::pointer_phase::up,
+                    .x = s.touch_x,
+                    .y = s.touch_y,
+                    .kind = input::device_type::touch});
+            }
+            break;
+        }
+        default:
+            break;
+        }
+        libinput_event_destroy(ev);
+    }
+}
+
 // ---- backend API -----------------------------------------------------------
 inline auto create(const config& cfg) -> state
 {
@@ -277,6 +471,8 @@ inline auto connect(state& s) -> result<void>
     if (auto err = setup_gbm(s); !err)
         return err;
     if (auto err = setup_egl(s); !err)
+        return err;
+    if (auto err = setup_libinput(s); !err)
         return err;
     return {};
 }
@@ -298,11 +494,13 @@ inline void run(state& s)
         s.cb.on_vsync();
     while (s.running)
     {
-        pollfd pfd{};
-        pfd.fd = s.fd;
-        pfd.events = POLLIN;
-        int rc = poll(&pfd, 1, 100);
-        if (rc > 0)
+        pollfd pfds[2] = {};
+        pfds[0].fd = s.fd;
+        pfds[0].events = POLLIN;
+        pfds[1].fd = s.li ? libinput_get_fd(s.li) : -1;
+        pfds[1].events = POLLIN;
+        int rc = poll(pfds, 2, 100);
+        if (rc > 0 && (pfds[0].revents & POLLIN))
         {
             // Handle DRM events, signalling vsync only on a completed
             // page flip (the display's physical refresh boundary).
@@ -311,6 +509,8 @@ inline void run(state& s)
             ev.page_flip_handler = on_flip_complete;
             drmHandleEvent(s.fd, &ev);
         }
+        if (rc > 0 && (pfds[1].revents & POLLIN))
+            dispatch_libinput(s);
     }
 }
 
@@ -375,6 +575,10 @@ inline void destroy(state& s)
 #endif
     if (s.gbm_dev)
         gbm_device_destroy(s.gbm_dev);
+    if (s.li)
+        libinput_unref(s.li);
+    if (s.udev_ctx)
+        udev_unref(s.udev_ctx);
     if (s.fd >= 0)
         close(s.fd);
 }

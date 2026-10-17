@@ -29,7 +29,9 @@ RUN dpkg --add-architecture "${TARGET_DEB_ARCH}" && \
       "libdrm-dev:${TARGET_DEB_ARCH}" \
       "libgbm-dev:${TARGET_DEB_ARCH}" \
       "libegl-dev:${TARGET_DEB_ARCH}" \
-      "libgles-dev:${TARGET_DEB_ARCH}" && \
+      "libgles-dev:${TARGET_DEB_ARCH}" \
+      "libinput-dev:${TARGET_DEB_ARCH}" \
+      "libudev-dev:${TARGET_DEB_ARCH}" && \
     rm -rf /var/lib/apt/lists/*
 
 ENV TARGET_TRIPLE=${TARGET_TRIPLE}

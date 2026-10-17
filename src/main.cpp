@@ -325,6 +325,10 @@ int main(int argc, char** argv)
     backend.cb.on_resize = [&](std::uint32_t w, std::uint32_t h)
     { shell::engine::on_resize(engine, w, h); };
     backend.cb.on_close = [&] { shell::engine::on_close(engine); };
+    backend.cb.on_pointer = [&](const shell::input::pointer_event& ev)
+    { shell::engine::send_pointer(engine, ev); };
+    backend.cb.on_key = [&](std::uint32_t code, bool down)
+    { shell::engine::send_key(engine, code, down); };
 #endif
 
     engine.out = &out;

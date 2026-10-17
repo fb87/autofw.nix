@@ -223,11 +223,21 @@ Acceptance: the same Flutter meta-application renders directly on DRM/KMS on a
 system with no EGL/GLES hardware acceleration.
 
 
-### M18 - Direct input  ✅ libinput-ready source (adapter)
+### M18 - Direct input  ✅ libinput integration (DRM backend)
 
-Implement libinput integration.
+Implement libinput integration: `backend::drm::setup_libinput`/
+`dispatch_libinput` in `include/shell/backend/drm.hpp` create a
+`libinput_udev_create_context` seat (`"seat0"`), fold its fd into `run()`'s
+poll loop, and translate keyboard/pointer/touch events into the same
+`shell::input::pointer_event`/evdev-keycode shapes `backend::wayland`
+already feeds to `engine::send_pointer`/`send_key` -- so keyboard layout
+translation (`shell::keyboard`, xkbcommon) needed no changes at all; it
+already self-initializes a default keymap when no compositor ever calls
+`on_keymap`.
 
-Acceptance: touch UI operates directly on DRM/KMS without Wayland.
+Acceptance: touch UI operates directly on DRM/KMS without Wayland. Requires
+read/write access to `/dev/input/event*` at runtime (the `input` group, or
+root).
 
 ### M19 - DRM vsync  ✅ page-flip timing
 

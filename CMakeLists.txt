@@ -73,10 +73,15 @@ elseif(OA_BACKEND STREQUAL "drm")
   if(NOT GBM_LIBRARY OR NOT DRM_LIBRARY)
     message(FATAL_ERROR "drm backend requested but gbm/libdrm not found")
   endif()
+  # DRM has no compositor of its own to supply input, so it reads directly
+  # from libinput (M18).
+  pkg_check_modules(LIBINPUT REQUIRED IMPORTED_TARGET libinput)
+  pkg_check_modules(LIBUDEV REQUIRED IMPORTED_TARGET libudev)
   target_compile_definitions(shell_impl INTERFACE SHELL_BACKEND_DRM=1)
   target_include_directories(shell_impl INTERFACE
     ${GBM_INCLUDE_DIR} ${DRM_MODESET_INCLUDE_DIR} ${DRM_CORE_INCLUDE_DIR})
-  target_link_libraries(shell_impl INTERFACE ${GBM_LIBRARY} ${DRM_LIBRARY})
+  target_link_libraries(shell_impl INTERFACE ${GBM_LIBRARY} ${DRM_LIBRARY}
+    PkgConfig::LIBINPUT PkgConfig::LIBUDEV)
 else()
   message(FATAL_ERROR "Unknown OA_BACKEND '${OA_BACKEND}'")
 endif()
