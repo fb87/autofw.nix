@@ -289,11 +289,20 @@ int main(int argc, char** argv)
     shell::backend::wayland::config cfg{.display = {}, .width = 1280, .height = 720};
     shell::backend::wayland::state backend = shell::backend::wayland::create(cfg);
     if (auto err = shell::backend::wayland::connect(backend); !err)
+    {
+        shell::backend::wayland::destroy(backend);
         return fail("wayland connect failed", err.error());
+    }
     if (auto err = shell::backend::wayland::setup_egl(backend); !err)
+    {
+        shell::backend::wayland::destroy(backend);
         return fail("wayland setup_egl failed", err.error());
+    }
     if (auto err = shell::backend::wayland::setup_surface(backend); !err)
+    {
+        shell::backend::wayland::destroy(backend);
         return fail("wayland setup_surface failed", err.error());
+    }
     out = shell::backend::wayland::output::take(backend);
     backend.cb.on_vsync = [&] { shell::engine::on_vsync(engine); };
     backend.cb.on_pointer = [&](const shell::input::pointer_event& ev)
@@ -319,7 +328,10 @@ int main(int argc, char** argv)
     shell::backend::drm::config cfg{.device = drm_device};
     shell::backend::drm::state backend = shell::backend::drm::create(cfg);
     if (auto err = shell::backend::drm::connect(backend); !err)
+    {
+        shell::backend::drm::destroy(backend);
         return fail("drm connect failed (device=" + drm_device + ")", err.error());
+    }
     out = shell::backend::drm::output::take(backend);
     backend.cb.on_vsync = [&] { shell::engine::on_vsync(engine); };
     backend.cb.on_resize = [&](std::uint32_t w, std::uint32_t h)

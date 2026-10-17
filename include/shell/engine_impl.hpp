@@ -453,39 +453,54 @@ inline void on_vsync(state& s)
 
 inline void send_pointer(state& s, const input::pointer_event& ev)
 {
-    FlutterPointerEvent pt = {};
-    pt.struct_size = sizeof(pt);
-    pt.timestamp = FlutterEngineGetCurrentTime();
-    pt.x = ev.x;
-    pt.y = ev.y;
-    pt.device = ev.device;
-    pt.device_kind = kFlutterPointerDeviceKindMouse;
-    pt.signal_kind = kFlutterPointerSignalKindNone;
-    pt.view_id = 0;
-    switch (ev.phase)
-    {
-    case input::pointer_phase::add:
-        pt.phase = kAdd;
-        break;
-    case input::pointer_phase::remove:
-        pt.phase = kRemove;
-        break;
-    case input::pointer_phase::down:
-        pt.phase = kDown;
-        break;
-    case input::pointer_phase::up:
-        pt.phase = kUp;
-        break;
-    case input::pointer_phase::move:
-        pt.phase = kMove;
-        break;
-    default:
-        pt.phase = kHover;
-        break;
-    }
-    pt.buttons = ev.buttons;
     s.last_buttons = ev.buttons;
-    FlutterEngineSendPointerEvent(s.fl, &pt, 1);
+
+    // Same requirement as send_key below: FlutterEngineSendPointerEvent must
+    // be called from the platform thread (the custom runner_thread here),
+    // not the backend's own dispatch thread -- deliver via the same
+    // runner_q marshaling.
+    auto deliver = [&s, ev]
+    {
+        FlutterPointerEvent pt = {};
+        pt.struct_size = sizeof(pt);
+        pt.timestamp = FlutterEngineGetCurrentTime();
+        pt.x = ev.x;
+        pt.y = ev.y;
+        pt.device = ev.device;
+        pt.device_kind = ev.kind == input::device_type::touch
+                             ? kFlutterPointerDeviceKindTouch
+                             : kFlutterPointerDeviceKindMouse;
+        pt.signal_kind = kFlutterPointerSignalKindNone;
+        pt.view_id = 0;
+        switch (ev.phase)
+        {
+        case input::pointer_phase::add:
+            pt.phase = kAdd;
+            break;
+        case input::pointer_phase::remove:
+            pt.phase = kRemove;
+            break;
+        case input::pointer_phase::down:
+            pt.phase = kDown;
+            break;
+        case input::pointer_phase::up:
+            pt.phase = kUp;
+            break;
+        case input::pointer_phase::move:
+            pt.phase = kMove;
+            break;
+        default:
+            pt.phase = kHover;
+            break;
+        }
+        pt.buttons = ev.buttons;
+        FlutterEngineSendPointerEvent(s.fl, &pt, 1);
+    };
+    {
+        std::lock_guard lock(s.runner_mutex);
+        s.runner_q.push_back(deliver);
+        s.runner_cv.notify_one();
+    }
 }
 
 // Forward declaration (defined below).

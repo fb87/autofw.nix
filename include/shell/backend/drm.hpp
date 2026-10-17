@@ -1,11 +1,14 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
+#include <cstdarg>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <EGL/egl.h>
@@ -89,12 +92,12 @@ struct state
     double pointer_x{};
     double pointer_y{};
     std::uint32_t buttons{};
-    // Last known position per touch seat slot, for LIBINPUT_EVENT_TOUCH_UP
-    // (which carries no coordinates of its own). Single-touch-screen
-    // assumption: not a full multi-slot map, just the latest slot/position.
-    std::int32_t touch_slot{-1};
-    double touch_x{};
-    double touch_y{};
+    // Last known position per touch seat slot (libinput seat slots are
+    // small, reused non-negative integers -- not a growing counter), for
+    // LIBINPUT_EVENT_TOUCH_UP, which carries no coordinates of its own.
+    // Indexed directly by slot; a fixed array keeps this allocation-free.
+    static constexpr std::size_t kMaxTouchSlots = 10;
+    std::array<std::pair<double, double>, kMaxTouchSlots> touch_pos{};
 
     std::uint32_t width{};
     std::uint32_t height{};
@@ -306,6 +309,20 @@ inline auto button_mask(std::uint32_t button) -> std::uint32_t
         return 0x4;
     return 0;
 }
+
+// Routes libinput's own diagnostics through shell::log instead of its
+// default raw-stderr handler. Priority stays at libinput's default
+// (LIBINPUT_LOG_PRIORITY_ERROR) -- it's not verbose by default.
+inline void li_log_handler(libinput*, libinput_log_priority priority,
+                           const char* format, va_list args)
+{
+    char buf[512];
+    std::vsnprintf(buf, sizeof(buf), format, args);
+    const char* level = priority >= LIBINPUT_LOG_PRIORITY_ERROR  ? "error"
+                        : priority >= LIBINPUT_LOG_PRIORITY_INFO ? "info"
+                                                                 : "debug";
+    log::info(std::string("libinput ") + level + ": " + buf);
+}
 } // namespace detail
 
 inline auto setup_libinput(state& s) -> result<void>
@@ -321,6 +338,7 @@ inline auto setup_libinput(state& s) -> result<void>
         return unexpected(
             error{.code = error_code::drm, .message = "libinput_udev_create_context"});
     }
+    libinput_log_set_handler(s.li, detail::li_log_handler);
     if (libinput_udev_assign_seat(s.li, "seat0") != 0)
     {
         return unexpected(
@@ -342,12 +360,23 @@ inline void dispatch_libinput(state& s)
     {
         switch (libinput_event_get_type(ev))
         {
+        case LIBINPUT_EVENT_DEVICE_ADDED:
+        case LIBINPUT_EVENT_DEVICE_REMOVED:
+        {
+            const char* name = libinput_device_get_name(libinput_event_get_device(ev));
+            log::info(std::string("libinput: device ") +
+                      (libinput_event_get_type(ev) == LIBINPUT_EVENT_DEVICE_ADDED
+                           ? "added: "
+                           : "removed: ") +
+                      (name ? name : "?"));
+            break;
+        }
         case LIBINPUT_EVENT_KEYBOARD_KEY:
         {
             auto* kev = libinput_event_get_keyboard_event(ev);
             std::uint32_t code = libinput_event_keyboard_get_key(kev);
-            bool pressed =
-                libinput_event_keyboard_get_key_state(kev) == LIBINPUT_KEY_STATE_PRESSED;
+            bool pressed = libinput_event_keyboard_get_key_state(kev) ==
+                           LIBINPUT_KEY_STATE_PRESSED;
             if (s.cb.on_key)
                 s.cb.on_key(code, pressed);
             break;
@@ -363,7 +392,7 @@ inline void dispatch_libinput(state& s)
             {
                 s.cb.on_pointer(input::pointer_event{
                     .phase = s.buttons ? input::pointer_phase::move
-                                      : input::pointer_phase::hover,
+                                       : input::pointer_phase::hover,
                     .x = s.pointer_x,
                     .y = s.pointer_y,
                     .buttons = s.buttons});
@@ -381,7 +410,7 @@ inline void dispatch_libinput(state& s)
             {
                 s.cb.on_pointer(input::pointer_event{
                     .phase = s.buttons ? input::pointer_phase::move
-                                      : input::pointer_phase::hover,
+                                       : input::pointer_phase::hover,
                     .x = s.pointer_x,
                     .y = s.pointer_y,
                     .buttons = s.buttons});
@@ -391,7 +420,8 @@ inline void dispatch_libinput(state& s)
         case LIBINPUT_EVENT_POINTER_BUTTON:
         {
             auto* pev = libinput_event_get_pointer_event(ev);
-            std::uint32_t mask = detail::button_mask(libinput_event_pointer_get_button(pev));
+            std::uint32_t mask =
+                detail::button_mask(libinput_event_pointer_get_button(pev));
             if (mask)
             {
                 bool pressed = libinput_event_pointer_get_button_state(pev) ==
@@ -404,7 +434,7 @@ inline void dispatch_libinput(state& s)
                 {
                     s.cb.on_pointer(input::pointer_event{
                         .phase = pressed ? input::pointer_phase::down
-                                        : input::pointer_phase::up,
+                                         : input::pointer_phase::up,
                         .x = s.pointer_x,
                         .y = s.pointer_y,
                         .buttons = s.buttons});
@@ -416,34 +446,41 @@ inline void dispatch_libinput(state& s)
         case LIBINPUT_EVENT_TOUCH_MOTION:
         {
             auto* tev = libinput_event_get_touch_event(ev);
-            s.touch_slot = libinput_event_touch_get_seat_slot(tev);
-            s.touch_x = libinput_event_touch_get_x_transformed(tev, s.width);
-            s.touch_y = libinput_event_touch_get_y_transformed(tev, s.height);
+            std::int32_t slot = libinput_event_touch_get_seat_slot(tev);
+            double x = libinput_event_touch_get_x_transformed(tev, s.width);
+            double y = libinput_event_touch_get_y_transformed(tev, s.height);
+            if (slot >= 0 && static_cast<std::size_t>(slot) < state::kMaxTouchSlots)
+                s.touch_pos[static_cast<std::size_t>(slot)] = {x, y};
             if (s.cb.on_pointer)
             {
                 s.cb.on_pointer(input::pointer_event{
-                    .device = static_cast<std::uint32_t>(s.touch_slot),
+                    .device = static_cast<std::uint32_t>(slot),
                     .phase = libinput_event_get_type(ev) == LIBINPUT_EVENT_TOUCH_DOWN
                                  ? input::pointer_phase::down
                                  : input::pointer_phase::move,
-                    .x = s.touch_x,
-                    .y = s.touch_y,
-                    .kind = input::device_type::touch});
+                    .x = x,
+                    .y = y,
+                    .kind = input::device_type::touch,
+                    .buttons = 0x1});
             }
             break;
         }
         case LIBINPUT_EVENT_TOUCH_UP:
         {
             auto* tev = libinput_event_get_touch_event(ev);
+            std::int32_t slot = libinput_event_touch_get_seat_slot(tev);
+            auto [x, y] =
+                (slot >= 0 && static_cast<std::size_t>(slot) < state::kMaxTouchSlots)
+                    ? s.touch_pos[static_cast<std::size_t>(slot)]
+                    : std::pair<double, double>{};
             if (s.cb.on_pointer)
             {
-                s.cb.on_pointer(input::pointer_event{
-                    .device = static_cast<std::uint32_t>(
-                        libinput_event_touch_get_seat_slot(tev)),
-                    .phase = input::pointer_phase::up,
-                    .x = s.touch_x,
-                    .y = s.touch_y,
-                    .kind = input::device_type::touch});
+                s.cb.on_pointer(
+                    input::pointer_event{.device = static_cast<std::uint32_t>(slot),
+                                         .phase = input::pointer_phase::up,
+                                         .x = x,
+                                         .y = y,
+                                         .kind = input::device_type::touch});
             }
             break;
         }
