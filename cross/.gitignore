@@ -1,0 +1,5 @@
+# Fetched by fetch-engine.sh.
+/engine-debug/
+/engine-release/
+# CMake build directories from build.sh.
+/build-*/

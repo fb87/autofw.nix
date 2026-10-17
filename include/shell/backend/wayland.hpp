@@ -2,6 +2,11 @@
 
 #pragma once
 
+// WL_EGL_PLATFORM must be defined (see CMakeLists.txt) before the *first*
+// <EGL/egl.h> is processed anywhere in the translation unit -- its include
+// guard means a #define here is too late, since shell/egl.hpp (pulled in
+// earlier via shell/engine.hpp) already included it.
+
 #include <cstdint>
 #include <string_view>
 

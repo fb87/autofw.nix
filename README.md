@@ -61,10 +61,45 @@ Flutter-side: `flutter/` holds the framework widgets; a runnable gallery lives i
 nix run .#gallery
 ```
 
-## Release builds (AOT, cross-compiled to arm64)
+## Release builds without Nix (Docker/Podman, cross-compiled to arm64)
 
-Develop on x86_64, cross-compile the native shell and cross-generate an AOT
-snapshot for arm64, no target-device build step and no emulation required:
+For developing on a plain Debian/Ubuntu (or any Docker/Podman-capable)
+machine with no Nix at all. `cross/` cross-compiles `shell_app` for aarch64
+using a real `aarch64-linux-gnu-gcc` cross toolchain (no emulation to
+compile); `examples/gallery/scripts/` (used below) are already Nix-free --
+plain curl/bash/dart/gen_snapshot.
+
+```sh
+# 1. fetch an AOT-capable engine root for aarch64 (pinned; see
+#    DEVELOPMENT.md's "Release/AOT toolchain" for why this isn't Google's)
+./cross/fetch-engine.sh release
+
+# 2. cross-compile shell_app for aarch64, in a Docker/Podman container
+#    (auto-detected; override with CONTAINER_ENGINE=podman)
+./cross/build.sh release wayland gl
+#   -> cross/build-release-wayland-gl/shell_app, a real aarch64 ELF
+
+# 3. release Flutter asset bundle + app.so (same as the Nix path below)
+cd examples/gallery
+./scripts/fetch-release-toolchain.sh
+./scripts/build-release-arm64.sh
+```
+
+If the target device's own libraries don't match Ubuntu's `:arm64` packages
+(different library versions/ABI -- e.g. a Yocto-built image), point
+`cross/build.sh` at an already-extracted copy of the target's rootfs instead:
+`TARGET_ROOTFS=/path/to/target-rootfs ./cross/build.sh release wayland gl`.
+
+Copy `cross/build-release-wayland-gl/shell_app`,
+`cross/engine-release/lib/libflutter_engine.so` +
+`cross/engine-release/share/icudtl.dat`, and
+`examples/gallery/build/release-arm64/flutter_assets/` to the arm64 target,
+then run exactly as in the Nix path below.
+
+## Release builds with Nix (AOT, cross-compiled to arm64)
+
+Same idea, but using Nix's own cross-compilation (`pkgsCross.aarch64-multiplatform`)
+instead of `cross/`'s Docker-based toolchain:
 
 ```sh
 # 1. native shell_app, cross-compiled to aarch64 (true Nix cross, no emulation)

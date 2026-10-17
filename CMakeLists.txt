@@ -56,6 +56,12 @@ target_link_libraries(shell_impl INTERFACE
 if(OA_BACKEND STREQUAL "wayland")
   pkg_check_modules(WAYLAND REQUIRED IMPORTED_TARGET wayland-client wayland-egl)
   target_compile_definitions(shell_impl INTERFACE SHELL_BACKEND_WAYLAND=1)
+  # Must come from a compiler flag, not a header #define: shell/egl.hpp
+  # (included before shell/backend/wayland.hpp via shell/engine.hpp) is the
+  # first thing to pull in <EGL/egl.h>, and its include guard means any
+  # #define placed later in the translation unit is too late to affect
+  # EGLNativeWindowType's definition in EGL/eglplatform.h.
+  target_compile_definitions(shell_impl INTERFACE WL_EGL_PLATFORM=1)
   target_link_libraries(shell_impl INTERFACE PkgConfig::WAYLAND)
 elseif(OA_BACKEND STREQUAL "drm")
   find_path(GBM_INCLUDE_DIR NAMES gbm.h)

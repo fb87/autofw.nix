@@ -290,7 +290,58 @@ directly via `dartaotruntime` + `frontend_server_aot.dart.snapshot`, then run
 ardera's `gen_snapshot_linux_x64_release` (a genuine x86_64 binary that
 cross-generates arm64 code) on the result.
 
-## 6. Definition of done
+### M22 - Non-Nix cross-compile toolchain  ✅ Docker/Podman, Debian/Ubuntu multiarch
+
+Implement a cross-compile path for `shell_app` that doesn't depend on Nix at
+all, for development on a plain Debian/Ubuntu machine: `cross/Dockerfile`,
+`cross/toolchain-aarch64-linux-gnu.cmake`, `cross/fetch-engine.sh`,
+`cross/build.sh`. Parallel to (not a replacement for) the Nix cross outputs.
+
+Acceptance: `cross/build.sh` produces a real aarch64 ELF `shell_app`,
+confirmed running against a real release AOT bundle through a real Wayland
+compositor, entirely via Debian/Ubuntu `:arm64` multiarch packages with no
+Nix and no emulation involved in the compile step.
+
+## 6. Non-Nix cross-compile toolchain (`cross/`)
+
+`cross/Dockerfile` installs `crossbuild-essential-arm64` (real
+`aarch64-linux-gnu-gcc`/`g++`, cross-compiles natively, no emulation) plus
+Ubuntu's `:arm64` multiarch dev packages (`libwayland-dev`,
+`libxkbcommon-dev`, `libdrm-dev`, `libgbm-dev`, `libegl-dev`, `libgles-dev`)
+as the default sysroot. `cross/toolchain-aarch64-linux-gnu.cmake` points
+CMake at the cross compiler; if `TARGET_ROOTFS` is set (an already-extracted
+directory -- e.g. the real target device's rootfs), it takes priority over
+the image's own multiarch packages instead, for when the target's library
+ABI/versions don't match Ubuntu's.
+
+Two things confirmed empirically while building this that are worth knowing:
+
+- **Debian/Ubuntu do not ship a `<triple>-pkg-config` cross wrapper** by
+  default (verified: `crossbuild-essential-arm64` alone doesn't provide
+  one, contrary to older Debian cross-building folklore). The toolchain
+  file instead uses plain `pkg-config`/`pkgconf` with `PKG_CONFIG_LIBDIR`
+  pointed at the right arch's `.pc` files and `PKG_CONFIG_PATH` cleared, so
+  nothing host-side leaks in.
+- **`WL_EGL_PLATFORM` must come from a compiler flag, not a header
+  `#define`.** `shell/egl.hpp` (pulled in before `shell/backend/wayland.hpp`
+  via `shell/engine.hpp`) is the first thing to include `<EGL/egl.h>`
+  anywhere in the translation unit; its include guard means a `#define`
+  placed later has no effect on `EGLNativeWindowType`'s definition in
+  `EGL/eglplatform.h`. Nix's EGL headers happened to tolerate the resulting
+  fallback (X11-style integer `EGLNativeWindowType` instead of Wayland's
+  pointer one); Ubuntu's don't, and the previously-silent mismatch surfaces
+  as a hard `reinterpret_cast` compile error. Fixed via
+  `target_compile_definitions(... WL_EGL_PLATFORM=1)` in `CMakeLists.txt`,
+  scoped to the wayland backend -- a real, previously-latent portability
+  bug this cross toolchain caught, not a cross-build-specific workaround.
+
+`cross/fetch-engine.sh {debug|release}` fetches a `FLUTTER_ENGINE_ROOT` in
+the same shape `CMakeLists.txt` already expects -- `debug` is Google's
+generic artifact (JIT-only, matching whatever `flutter` is on `$PATH`),
+`release` is the same `arderaReleaseEnginePin` as `flake.nix`, so both paths
+stay pinned to one source of truth.
+
+## 7. Definition of done
 
 A feature is complete only when:
 
@@ -305,7 +356,7 @@ A feature is complete only when:
 - documentation is updated
 - acceptance criteria are verified
 
-## 7. Guiding rule
+## 8. Guiding rule
 
 When choosing between framework cleverness and explicit composition, prefer
 explicit composition.
