@@ -54,6 +54,12 @@ struct state
 {
     config cfg;
     backend::output* out{};
+    // Propagated onto runner_thread (see start_runner in engine_impl.hpp) so
+    // platform-thread log lines (IME "[sel]", key results "[kr]", ...) carry
+    // the same per-display tag as the thread that constructed this engine --
+    // shell::log::g_tag is thread_local, so it doesn't cross threads on its
+    // own. Empty by default: single-display processes see no tag, as today.
+    std::string log_tag;
 
     FlutterEngine fl{};
     FlutterEngineAOTData aot_data{};

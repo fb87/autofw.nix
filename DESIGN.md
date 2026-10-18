@@ -193,17 +193,71 @@ incoming_call
 diagnostics
 ```
 
-For multi-display products:
-
-```text
-center_display
-cluster
-passenger_display
-hud
-```
-
 Multiple stages may be visible simultaneously. There is no architectural
 assumption that exactly one stage is active.
+
+Note: a `stage` here is a logical scene container *within one engine*
+(`stage::registry` lives inside `engine::state`), not a physical display --
+see "9.1 Multi-display" below for how actual separate screens are modeled.
+
+## 9.1 Multi-display
+
+`shell_app` can drive N physical displays from one process: one Flutter
+engine + backend output per display, each with its own private
+stage/layer registry (section 9/10 above apply per-display, unchanged).
+A crash in one display's Dart code stays isolated to that display's engine
+instance; a crash in the shared native process (e.g. a native segfault)
+still takes down every display -- this is in-process isolation, not
+OS-process isolation (that is a later roadmap step).
+
+Every display currently runs the *same* asset bundle
+(`--assets`/`--icu`/`--aot-lib` are process-wide, not per-display); serving
+different content per display is not yet implemented.
+
+CLI surface (`src/main.cpp`):
+
+```text
+--display width=W,height=H,primary        (Wayland: one dev-mode window per
+                                             --display)
+--display drm-device=PATH,connector=ID,primary
+                                            (DRM: one physical output per
+                                             --display; connector is a
+                                             numeric connector id, auto-
+                                             assigned from the connected
+                                             connectors on that device if
+                                             omitted)
+--input-device MATCH=DISPLAY_INDEX         (DRM only; MATCH is a sysname
+                                             "/dev/input/eventN", a
+                                             "vendor:product" hex pair, or a
+                                             substring of the device name)
+```
+
+Zero `--display` flags synthesizes exactly one display from the legacy
+top-level flags (`--drm-device` etc.) -- every pre-multi-display invocation
+keeps working unchanged. Exactly one display must be `primary` (default:
+the first) -- it alone runs `--test-texture`/`--test-input`/`--test-layers`.
+
+Shutdown is kiosk-style, all-or-nothing: any display closing (or failing to
+start) tears every other display down and the process exits. This matches
+a single HMI system where losing one screen is a fault condition, not a
+reason to keep partially running.
+
+Two DRM outputs may share one GPU/card (common on automotive SoCs driving
+e.g. cluster + center stack off one chip): `shell::backend::drm::card`
+holds the one shared fd/`gbm_device`/`EGLDisplay` for a device node,
+refcounted across however many `shell::backend::drm::state` (output)
+instances are opened on it via `open_output()`/`close_output()`, so the
+shared `EGLDisplay` is only torn down once the last output on that card
+closes.
+
+Input on DRM is owned by exactly one process-wide `shell::input_router`
+(one libinput/udev `seat0` context total) rather than one per output --
+each `drm::state` grabbing its own seat context would double-deliver every
+physical input event. `--input-device` rules assign specific physical
+devices to specific displays; decoded events are sent directly to that
+display's engine (`engine::send_pointer`/`send_key`, safe to call from any
+thread since they internally marshal onto that engine's own platform
+runner thread).
 
 ## 10. Layer
 

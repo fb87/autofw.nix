@@ -140,6 +140,7 @@ inline auto start_runner(state& s) -> void
     s.runner_thread = std::thread(
         [&s]
         {
+            log::set_tag(s.log_tag);
             s.runner_id = std::this_thread::get_id();
             std::unique_lock lock(s.runner_mutex);
             while (s.runner_started)
@@ -450,6 +451,33 @@ inline auto destroy(state& s) -> void
         FlutterEngineShutdown(s.fl);
     if (s.aot_data)
         FlutterEngineCollectAOTData(s.aot_data);
+#ifdef SHELL_RENDERER_GL
+    // FlutterEngineShutdown above has already joined the engine's own
+    // render/raster threads, so it's safe to tear down the contexts we
+    // created in init() here -- these were never destroyed before, which
+    // leaked 3 EGL contexts per engine lifecycle (harmless for a
+    // process-lifetime single engine, but a real leak once displays are
+    // created/destroyed repeatedly, e.g. multi-display teardown).
+    if (s.out && s.out->egl_display)
+    {
+        EGLDisplay dpy = static_cast<EGLDisplay>(s.out->egl_display);
+        if (s.gl_ctx != EGL_NO_CONTEXT)
+        {
+            eglDestroyContext(dpy, s.gl_ctx);
+            s.gl_ctx = EGL_NO_CONTEXT;
+        }
+        if (s.resource_ctx != EGL_NO_CONTEXT)
+        {
+            eglDestroyContext(dpy, s.resource_ctx);
+            s.resource_ctx = EGL_NO_CONTEXT;
+        }
+        if (s.upload_ctx != EGL_NO_CONTEXT)
+        {
+            eglDestroyContext(dpy, s.upload_ctx);
+            s.upload_ctx = EGL_NO_CONTEXT;
+        }
+    }
+#endif
     stop_runner(s);
 }
 
@@ -691,7 +719,7 @@ inline void send_key(state& s, std::uint32_t evdev_code, bool down)
         key.device_type = kFlutterKeyEventDeviceTypeKeyboard;
         FlutterEngineResult kr =
             FlutterEngineSendKeyEvent(s.fl, &key, nullptr, nullptr);
-        std::fprintf(stderr, "[kr] rc=%d\n", (int)kr);
+        log::info("[kr] rc=" + std::to_string(static_cast<int>(kr)));
 
         // Drive host-side IME under the state lock, building host->framework
         // JSON; send it after the lock is released.
@@ -887,9 +915,11 @@ void on_platform_message(const FlutterPlatformMessage* m, void* d)
         {
             std::lock_guard lock(e->ti.mutex);
             resp = textinput::handle(e->ti, payload);
-            std::fprintf(stderr, "[sel] client=%ld text='%.48s' sel=%ld..%ld\n",
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "[sel] client=%ld text='%.48s' sel=%ld..%ld",
                          (long)e->ti.client, e->ti.text.c_str(),
                          (long)e->ti.selection_base, (long)e->ti.selection_extent);
+            log::info(buf);
         }
         // We must always answer (even a bare ACK keeps the connection alive).
         if (resp.empty())
