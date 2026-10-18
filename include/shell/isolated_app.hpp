@@ -32,6 +32,7 @@
 #include <shell/egl.hpp>
 #include <shell/engine.hpp>
 #include <shell/error.hpp>
+#include <shell/input.hpp>
 #include <shell/ipc.hpp>
 #include <shell/log.hpp>
 #include <shell/restart_policy.hpp>
@@ -99,6 +100,21 @@ struct state
 
 inline auto create(state& s, config cfg) -> result<void>;
 inline auto destroy(state& s) -> void;
+
+// Forward pointer/key input to the child -- `ev`/`evdev_code` must already
+// be in this app's own local coordinate space (isolated_app has no notion
+// of where it's displayed on the primary's screen; that's the caller's
+// concern, same as its on-screen bounds already are -- see
+// src/main.cpp's dashboard dispatcher). Best-effort: silently drops the
+// event if the child isn't currently connected (`!s.running`, e.g. mid
+// Step-5 restart backoff) rather than erroring -- losing an input event
+// during a brief respawn gap is the right behavior, not a failure to
+// report. No new locking: nothing else ever writes to
+// `s.child.parent_input_fd` (unlike `parent_fd`, which the receiver
+// thread also writes `buffer_released` to -- exactly why input events get
+// their own dedicated fd instead of reusing that one).
+inline auto send_pointer(state& s, const input::pointer_event& ev) -> void;
+inline auto send_key(state& s, std::uint32_t evdev_code, bool down) -> void;
 
 } // namespace shell::isolated_app
 

@@ -218,6 +218,39 @@ inline auto run(config cfg) -> int
             s.release_listener_running.store(false, std::memory_order_relaxed);
         });
 
+    s.input_listener_running.store(true, std::memory_order_relaxed);
+    s.input_listener_thread = std::thread(
+        [&s]
+        {
+            log::set_tag(s.cfg.log_tag + "-in");
+            ipc::input_msg msg{};
+            while (s.input_listener_running.load(std::memory_order_relaxed) &&
+                  ipc::recv_input(s.cfg.input_fd, msg))
+            {
+                if (msg.kind == ipc::input_kind::pointer)
+                {
+                    input::pointer_event ev{
+                        .device = msg.device,
+                        .phase = static_cast<input::pointer_phase>(msg.phase),
+                        .x = msg.x,
+                        .y = msg.y,
+                        .kind = static_cast<input::device_type>(msg.pointer_device_kind),
+                        .buttons = msg.buttons,
+                    };
+                    engine::send_pointer(s.engine, ev);
+                }
+                else
+                {
+                    engine::send_key(s.engine, msg.evdev_code, msg.key_down != 0);
+                }
+            }
+            // Same shutdown signal shape as release_listener_thread: EOF
+            // here means the parent is gone (both its fds into this child
+            // die together when the parent process exits), not a protocol
+            // error worth distinguishing from the ipc_fd side.
+            s.input_listener_running.store(false, std::memory_order_relaxed);
+        });
+
     s.vsync_running.store(true, std::memory_order_relaxed);
     s.vsync_thread = std::thread(
         [&s]
@@ -239,6 +272,13 @@ inline auto run(config cfg) -> int
     // making it the natural "time to shut down" signal.
     if (s.release_listener_thread.joinable())
         s.release_listener_thread.join();
+
+    // input_listener_thread's own fd (input_fd) dies alongside ipc_fd when
+    // the parent process goes away -- it will have already unblocked via
+    // its own EOF by now in practice, this join just ensures it has.
+    s.input_listener_running.store(false, std::memory_order_relaxed);
+    if (s.input_listener_thread.joinable())
+        s.input_listener_thread.join();
 
     s.vsync_running.store(false, std::memory_order_relaxed);
     if (s.vsync_thread.joinable())

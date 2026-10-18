@@ -29,6 +29,14 @@ inline auto try_connect(state& s) -> result<void>
     auto child = ipc::spawn_child(spawn_cfg);
     if (!child)
         return unexpected(child.error());
+    // Close the previous attempt's fds before overwriting s.child -- this is
+    // the one place s.child ever gets replaced (both the first connect from
+    // create() and every Step-5 restart retry go through here), so it's
+    // also the one place that needs to close what it's about to discard.
+    if (s.child.parent_fd >= 0)
+        close(s.child.parent_fd);
+    if (s.child.parent_input_fd >= 0)
+        close(s.child.parent_input_fd);
     s.child = *child;
 
     std::vector<int> recv_fds;
@@ -253,6 +261,19 @@ inline auto destroy(state& s) -> void
     if (s.receiver.joinable())
         s.receiver.join();
 
+    // Safe only now that `receiver` (the sole thread that ever reads
+    // parent_fd) has been joined -- closing a fd a thread is still blocked
+    // reading is racy (see ipc::terminate's doc comment). Nothing ever
+    // reads parent_input_fd on this side (it's parent -> child only), so
+    // there's no equivalent ordering constraint for it, but closing it here
+    // too keeps both fds' lifetimes symmetric and easy to reason about.
+    if (s.child.parent_fd >= 0)
+        close(s.child.parent_fd);
+    if (s.child.parent_input_fd >= 0)
+        close(s.child.parent_input_fd);
+    s.child.parent_fd = -1;
+    s.child.parent_input_fd = -1;
+
     auto dpy = static_cast<EGLDisplay>(s.cfg.primary->out->egl_display);
     if (s.creator_ctx != EGL_NO_CONTEXT)
     {
@@ -265,6 +286,30 @@ inline auto destroy(state& s) -> void
         }
         eglDestroyContext(dpy, s.creator_ctx);
     }
+}
+
+inline auto send_pointer(state& s, const input::pointer_event& ev) -> void
+{
+    if (!s.running.load(std::memory_order_relaxed))
+        return;
+    ipc::input_msg msg{.kind = ipc::input_kind::pointer,
+                       .x = ev.x,
+                       .y = ev.y,
+                       .phase = static_cast<std::uint32_t>(ev.phase),
+                       .buttons = ev.buttons,
+                       .device = ev.device,
+                       .pointer_device_kind = static_cast<std::uint32_t>(ev.kind)};
+    ipc::send_input(s.child.parent_input_fd, msg);
+}
+
+inline auto send_key(state& s, std::uint32_t evdev_code, bool down) -> void
+{
+    if (!s.running.load(std::memory_order_relaxed))
+        return;
+    ipc::input_msg msg{.kind = ipc::input_kind::key,
+                       .evdev_code = evdev_code,
+                       .key_down = down ? 1u : 0u};
+    ipc::send_input(s.child.parent_input_fd, msg);
 }
 
 } // namespace shell::isolated_app

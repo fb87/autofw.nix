@@ -54,6 +54,7 @@ struct options
     std::string infotainment_assets;
     std::string infotainment_icu;
     std::string infotainment_aot_lib;
+    bool test_dashboard_input{};
 
     std::vector<std::string> display_specs;      // raw "--display key=val,..." strings
     std::vector<std::string> input_device_specs;  // raw "--input-device match=idx" strings
@@ -67,6 +68,7 @@ struct options
     std::uint32_t child_width{1280};
     std::uint32_t child_height{720};
     int child_ipc_fd{-1};
+    int child_input_fd{-1};
 };
 
 // One requested display. Populated either from legacy top-level flags (zero
@@ -157,6 +159,11 @@ void print_usage(const char* prog)
         "                   composited on the right under a status bar/dock;\n"
         "                   also a real OS-process-isolated shell::isolated_app\n"
         "                   with auto-restart enabled.\n"
+        "  --test-dashboard-input\n"
+        "                   (requires --cluster-assets/--infotainment-assets;\n"
+        "                   Wayland only) inject synthetic taps + key presses\n"
+        "                   at coordinates inside each pane and confirm they\n"
+        "                   route to the right child (primary display)\n"
         "  --help           show this help\n",
         prog);
 }
@@ -179,6 +186,8 @@ enum
     kOptInfotainmentAssets = 269,
     kOptInfotainmentIcu = 270,
     kOptInfotainmentAotLib = 271,
+    kOptChildInputFd = 272,
+    kOptTestDashboardInput = 273,
 };
 
 options parse_args(int argc, char** argv)
@@ -210,6 +219,8 @@ options parse_args(int argc, char** argv)
         {"width", required_argument, nullptr, kOptChildWidth},
         {"height", required_argument, nullptr, kOptChildHeight},
         {"ipc-fd", required_argument, nullptr, kOptChildIpcFd},
+        {"input-fd", required_argument, nullptr, kOptChildInputFd},
+        {"test-dashboard-input", no_argument, nullptr, kOptTestDashboardInput},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
@@ -294,6 +305,12 @@ options parse_args(int argc, char** argv)
             break;
         case kOptChildIpcFd:
             out.child_ipc_fd = std::stoi(optarg);
+            break;
+        case kOptChildInputFd:
+            out.child_input_fd = std::stoi(optarg);
+            break;
+        case kOptTestDashboardInput:
+            out.test_dashboard_input = true;
             break;
         case 'h':
         default:
@@ -956,6 +973,13 @@ struct dashboard_apps
     shell::isolated_app::state infotainment;
     bool cluster_spawned{};
     bool infotainment_spawned{};
+    // On-screen rectangles, same primary-window pixel space pointer_event
+    // coordinates already arrive in -- populated by setup_dashboard_apps,
+    // consulted by run_one_display's input dispatcher to hit-test a tap
+    // and to translate it into each pane's own local coordinate space
+    // before forwarding (shell::isolated_app itself is position-agnostic).
+    shell::layer::geometry cluster_bounds{};
+    shell::layer::geometry infotainment_bounds{};
 };
 
 bool setup_dashboard_apps(shell::engine::state& primary, const options& opts,
@@ -967,17 +991,18 @@ bool setup_dashboard_apps(shell::engine::state& primary, const options& opts,
     const std::uint32_t chrome_h = static_cast<std::uint32_t>(kStatusBarHeight + kDockHeight);
     const std::uint32_t right_h = display_h > chrome_h ? display_h - chrome_h : display_h;
 
+    apps.cluster_bounds = {0, 0, static_cast<float>(left_w), static_cast<float>(display_h)};
+    apps.infotainment_bounds = {static_cast<float>(left_w), kStatusBarHeight,
+                                static_cast<float>(right_w), static_cast<float>(right_h)};
+
     shell::engine::add_layer(
         primary, shell::layer::state{.value = kClusterLayerId, .stage = kDashboardStageId,
                                      .kind = shell::layer::role::application,
-                                     .bounds = {0, 0, static_cast<float>(left_w),
-                                               static_cast<float>(display_h)}});
+                                     .bounds = apps.cluster_bounds});
     shell::engine::add_layer(
         primary, shell::layer::state{.value = kInfotainmentLayerId, .stage = kDashboardStageId,
                                      .kind = shell::layer::role::application,
-                                     .bounds = {static_cast<float>(left_w), kStatusBarHeight,
-                                               static_cast<float>(right_w),
-                                               static_cast<float>(right_h)}});
+                                     .bounds = apps.infotainment_bounds});
 
     if (!shell::engine::register_texture(primary, kClusterTextureId))
     {
@@ -1054,6 +1079,60 @@ void teardown_dashboard_apps(shell::engine::state& primary, dashboard_apps& apps
 }
 #endif // SHELL_RENDERER_GL
 
+#if defined(SHELL_RENDERER_GL) && defined(SHELL_BACKEND_WAYLAND)
+// Exercises the REAL position-based dispatcher (backend.cb.on_pointer/
+// on_key, called exactly as a genuine Wayland pointer/keyboard event
+// would be) -- not just shell::isolated_app's IPC plumbing directly -- by
+// injecting synthetic events at primary-screen coordinates known to fall
+// inside each pane's bounds, then confirming via log output that they
+// landed on the intended target. Used as `--test-dashboard-input`
+// (requires --cluster-assets/--infotainment-assets; primary display;
+// Wayland only -- DRM has no equivalent per-position dispatcher wired up).
+void run_dashboard_input_test(const dashboard_apps& apps,
+                              const shell::backend::wayland::callbacks& cb, bool* running)
+{
+    // Give setup_dashboard_apps' children a few seconds to connect and the
+    // gallery's Form panel to auto-focus its text field -- same boot
+    // window run_input_test already waits out for the primary case.
+    std::this_thread::sleep_for(std::chrono::seconds(6));
+
+    auto tap = [&](const shell::layer::geometry& bounds, double y_frac = 0.5)
+    {
+        double x = bounds.x + bounds.width / 2;
+        double y = bounds.y + bounds.height * y_frac;
+        cb.on_pointer(shell::input::pointer_event{
+            .phase = shell::input::pointer_phase::down, .x = x, .y = y});
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        cb.on_pointer(
+            shell::input::pointer_event{.phase = shell::input::pointer_phase::up, .x = x, .y = y});
+    };
+    auto type = [&](std::initializer_list<std::uint32_t> codes)
+    {
+        for (auto code : codes)
+        {
+            cb.on_key(code, true);
+            std::this_thread::sleep_for(std::chrono::milliseconds(30));
+            cb.on_key(code, false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        }
+    };
+
+    shell::log::info("[test-dashboard-input] tapping cluster pane, sending a probe key");
+    tap(apps.cluster_bounds);
+    type({35}); // KEY_H -- cluster has no text field; exercises the dispatch+IPC path only.
+
+    shell::log::info("[test-dashboard-input] tapping infotainment pane, typing 'hi'");
+    // ~13% down from the top of the pane -- the gallery Form panel's
+    // "Basic text field" row, confirmed against a real captured frame of
+    // this exact layout (not a guess); dead-center landed on unrelated
+    // content further down the form and defocused the field instead.
+    tap(apps.infotainment_bounds, 0.13);
+    type({35, 23}); // KEY_H, KEY_I -- lands in the gallery's already-focused Basic text field.
+
+    *running = false;
+}
+#endif
+
 // Runs one display's full engine+backend lifecycle on the calling thread;
 // blocks on that backend's run() loop. Intended to be invoked once per
 // display_spec, each on its own std::thread. Any failure (startup or
@@ -1102,6 +1181,45 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
 
     shell::backend::output out{};
 
+#ifdef SHELL_RENDERER_GL
+    // Declared up here (not at the dashboard setup call site below) because
+    // the pointer/key dispatcher wired into backend.cb just below needs to
+    // capture them by reference; setup_dashboard_apps (called later, after
+    // engine::init) just populates what's already declared.
+    dashboard_apps dash_apps;
+    bool dashboard_active = false;
+    enum class dashboard_focus
+    {
+        primary,
+        cluster,
+        infotainment,
+    };
+    dashboard_focus focus = dashboard_focus::primary;
+    auto inside = [](const shell::layer::geometry& b, double x, double y)
+    {
+        return x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height;
+    };
+    auto hit_test = [&](double x, double y)
+    {
+        if (dashboard_active)
+        {
+            if (inside(dash_apps.cluster_bounds, x, y))
+                return dashboard_focus::cluster;
+            if (inside(dash_apps.infotainment_bounds, x, y))
+                return dashboard_focus::infotainment;
+        }
+        return dashboard_focus::primary;
+    };
+    auto translate = [](const shell::input::pointer_event& ev,
+                        const shell::layer::geometry& bounds)
+    {
+        shell::input::pointer_event local = ev;
+        local.x -= bounds.x;
+        local.y -= bounds.y;
+        return local;
+    };
+#endif
+
 #ifdef SHELL_BACKEND_WAYLAND
     shell::backend::wayland::config cfg{
         .display = {}, .width = spec.width, .height = spec.height};
@@ -1126,10 +1244,52 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
     }
     out = shell::backend::wayland::output::take(backend);
     backend.cb.on_vsync = [&] { shell::engine::on_vsync(engine); };
+#ifdef SHELL_RENDERER_GL
+    backend.cb.on_pointer = [&](const shell::input::pointer_event& ev)
+    {
+        // Only a fresh down re-evaluates focus -- a drag that leaves the
+        // pane it started on stays targeted there, standard UI behavior
+        // (not re-hit-tested on every move/up).
+        if (ev.phase == shell::input::pointer_phase::down)
+            focus = hit_test(ev.x, ev.y);
+        switch (focus)
+        {
+        case dashboard_focus::cluster:
+            shell::isolated_app::send_pointer(dash_apps.cluster,
+                                              translate(ev, dash_apps.cluster_bounds));
+            break;
+        case dashboard_focus::infotainment:
+            shell::isolated_app::send_pointer(dash_apps.infotainment,
+                                              translate(ev, dash_apps.infotainment_bounds));
+            break;
+        case dashboard_focus::primary:
+            shell::engine::send_pointer(engine, ev);
+            break;
+        }
+    };
+    backend.cb.on_key = [&](std::uint32_t code, bool down)
+    {
+        // Keyboard has no inherent position -- it follows whichever pane
+        // the most recent pointer-down landed on ("tap to focus").
+        switch (focus)
+        {
+        case dashboard_focus::cluster:
+            shell::isolated_app::send_key(dash_apps.cluster, code, down);
+            break;
+        case dashboard_focus::infotainment:
+            shell::isolated_app::send_key(dash_apps.infotainment, code, down);
+            break;
+        case dashboard_focus::primary:
+            shell::engine::send_key(engine, code, down);
+            break;
+        }
+    };
+#else
     backend.cb.on_pointer = [&](const shell::input::pointer_event& ev)
     { shell::engine::send_pointer(engine, ev); };
     backend.cb.on_key = [&](std::uint32_t code, bool down)
     { shell::engine::send_key(engine, code, down); };
+#endif
     backend.cb.on_keymap = [&](int fd, std::uint32_t size)
     { shell::engine::on_keymap(engine, fd, size); };
     backend.cb.on_resize = [&](std::uint32_t w, std::uint32_t h)
@@ -1274,8 +1434,6 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
             });
     }
 
-    dashboard_apps dash_apps;
-    bool dashboard_active = false;
     if (spec.primary && !opts.cluster_assets.empty() && !opts.infotainment_assets.empty())
     {
         dashboard_active = setup_dashboard_apps(engine, opts, out.width, out.height, dash_apps);
@@ -1285,6 +1443,21 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
         shell::log::info("[dashboard] both --cluster-assets and --infotainment-assets "
                          "are required to enable the dashboard layout; ignoring");
     }
+
+#ifdef SHELL_BACKEND_WAYLAND
+    std::thread dashinputtest;
+    bool dashinputtest_running = false;
+    if (dashboard_active && opts.test_dashboard_input)
+    {
+        dashinputtest_running = true;
+        dashinputtest = std::thread(
+            [&dash_apps, &backend, &dashinputtest_running, tag]
+            {
+                shell::log::set_tag(tag);
+                run_dashboard_input_test(dash_apps, backend.cb, &dashinputtest_running);
+            });
+    }
+#endif
 #endif
 
 #ifdef SHELL_BACKEND_WAYLAND
@@ -1334,6 +1507,13 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
         secwdtest_running = false;
         secwdtest.join();
     }
+#ifdef SHELL_BACKEND_WAYLAND
+    if (dashinputtest.joinable())
+    {
+        dashinputtest_running = false;
+        dashinputtest.join();
+    }
+#endif
     if (dashboard_active)
         teardown_dashboard_apps(engine, dash_apps);
 #endif
@@ -1420,7 +1600,8 @@ int main(int argc, char** argv)
                                           .width = opts.child_width,
                                           .height = opts.child_height,
                                           .log_tag = "child",
-                                          .ipc_fd = opts.child_ipc_fd};
+                                          .ipc_fd = opts.child_ipc_fd,
+                                          .input_fd = opts.child_input_fd};
         return shell::child_renderer::run(cfg);
     }
 #endif

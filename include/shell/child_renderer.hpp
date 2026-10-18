@@ -18,6 +18,16 @@
 // exported once, at startup, during the handshake) is announced ready to
 // the parent over the IPC socket, carrying a native fence the parent must
 // wait on before sampling it.
+//
+// Pointer/key input flows the other way, parent -> child, over a second,
+// dedicated socket (cfg.input_fd, shell::ipc::input_msg) -- kept separate
+// from the frame-lifecycle socket (cfg.ipc_fd) so each fd keeps the
+// "exactly one message shape per reader thread" property both already
+// relied on; see shell::ipc's module comment for why. Applied directly via
+// engine::send_pointer/send_key against this child's own engine::state --
+// those functions are self-contained and already marshal onto the
+// engine's own platform thread, no different from how the primary
+// display's backend feeds them today.
 
 #ifdef SHELL_RENDERER_GL
 
@@ -33,6 +43,7 @@
 #include <shell/egl.hpp>
 #include <shell/engine.hpp>
 #include <shell/gbm_export.hpp>
+#include <shell/input.hpp>
 #include <shell/ipc.hpp>
 #include <shell/log.hpp>
 #include <shell/renderer.hpp>
@@ -54,6 +65,7 @@ struct config
     double fps{60.0}; // no real display to sync to -- timer-pumped vsync.
     std::string log_tag;
     int ipc_fd{-1};
+    int input_fd{-1}; // pointer/key events from the parent -- see shell::ipc::input_msg.
 };
 
 struct ring_buffer
@@ -85,6 +97,8 @@ struct state
     std::thread vsync_thread;
     std::atomic<bool> release_listener_running{false};
     std::thread release_listener_thread;
+    std::atomic<bool> input_listener_running{false};
+    std::thread input_listener_thread;
 };
 
 // The child's entire post-exec program. Blocks until the parent goes away

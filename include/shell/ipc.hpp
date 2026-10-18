@@ -38,11 +38,18 @@ struct spawn_config
 struct child_process
 {
     pid_t pid{-1};
-    int parent_fd{-1};
+    int parent_fd{-1};       // frame lifecycle: handshake/frame_ready/buffer_released.
+    int parent_input_fd{-1}; // pointer/key events only -- see input_msg below. Kept
+                             // separate from parent_fd deliberately: each fd has
+                             // exactly one reader thread on each side today, which
+                             // only works because each fd carries exactly one
+                             // message shape; mixing input into the frame-lifecycle
+                             // fd would force one reader to disambiguate two
+                             // unrelated message shapes with no tag.
 };
 
 // Spawns the SAME shell_app binary in --child-renderer mode, connected to
-// the returned child_process::parent_fd via a socketpair.
+// the returned child_process::parent_fd/parent_input_fd via two socketpairs.
 //
 // Between fork() and execv(), the child may only call async-signal-safe
 // functions -- the process calling this almost certainly already has other
@@ -58,8 +65,16 @@ inline auto spawn_child(const spawn_config& cfg) -> result<child_process>
     int fds[2];
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) != 0)
         return unexpected(error{.code = error_code::system, .message = "socketpair"});
+    int input_fds[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, input_fds) != 0)
+    {
+        close(fds[0]);
+        close(fds[1]);
+        return unexpected(error{.code = error_code::system, .message = "input socketpair"});
+    }
 
     std::string ipc_fd_arg = "--ipc-fd=" + std::to_string(fds[1]);
+    std::string input_fd_arg = "--input-fd=" + std::to_string(input_fds[1]);
     std::string width_arg = "--width=" + std::to_string(cfg.width);
     std::string height_arg = "--height=" + std::to_string(cfg.height);
     std::string assets_arg = "--assets=" + cfg.assets;
@@ -70,6 +85,7 @@ inline auto spawn_child(const spawn_config& cfg) -> result<child_process>
     argv.push_back(const_cast<char*>(cfg.exe_path.c_str()));
     argv.push_back(const_cast<char*>("--child-renderer"));
     argv.push_back(const_cast<char*>(ipc_fd_arg.c_str()));
+    argv.push_back(const_cast<char*>(input_fd_arg.c_str()));
     argv.push_back(const_cast<char*>(width_arg.c_str()));
     argv.push_back(const_cast<char*>(height_arg.c_str()));
     argv.push_back(const_cast<char*>(assets_arg.c_str()));
@@ -83,26 +99,31 @@ inline auto spawn_child(const spawn_config& cfg) -> result<child_process>
     {
         close(fds[0]);
         close(fds[1]);
+        close(input_fds[0]);
+        close(input_fds[1]);
         return unexpected(error{.code = error_code::system, .message = "fork"});
     }
     if (pid == 0)
     {
         // Child: async-signal-safe only, from here to execv/_exit.
         close(fds[0]);
-        fcntl(fds[1], F_SETFD, 0); // clear CLOEXEC -- must survive exec
+        close(input_fds[0]);
+        fcntl(fds[1], F_SETFD, 0);       // clear CLOEXEC -- must survive exec
+        fcntl(input_fds[1], F_SETFD, 0); // same
         execv(cfg.exe_path.c_str(), argv.data());
         _exit(127); // execv failed
     }
     close(fds[1]);
-    return child_process{pid, fds[0]};
+    close(input_fds[1]);
+    return child_process{pid, fds[0], input_fds[0]};
 }
 
-// Sends SIGTERM only -- deliberately does not touch parent_fd. The caller
-// (shell::isolated_app::destroy) must join whatever thread is blocked
-// reading parent_fd BEFORE closing it: closing a fd that another thread is
+// Sends SIGTERM only -- deliberately does not touch parent_fd/parent_input_fd.
+// The caller (shell::isolated_app::destroy) must join whatever thread is
+// blocked reading them BEFORE closing: closing a fd that another thread is
 // blocked on is racy (the fd number can be reused by a concurrently opened,
 // unrelated fd, waking the blocked read on the wrong socket). SIGTERM
-// causes the child to exit, which closes its end and unblocks the reader
+// causes the child to exit, which closes its ends and unblocks the readers
 // with a clean EOF -- that is the intended wakeup path, not this function
 // closing anything itself.
 inline auto terminate(child_process& c) -> void
@@ -294,6 +315,71 @@ inline auto recv_buffer_released(int fd, buffer_released& msg, int& release_fenc
     -> bool
 {
     return detail::recv_with_fd(fd, msg, release_fence_fd_out);
+}
+
+// ---- input events, parent -> child only, over parent_input_fd -------------
+//
+// Deliberately NOT built on detail::send_with_fd/recv_with_fd: those always
+// carry exactly one real fd via SCM_RIGHTS, and a pointer/key event has no
+// fd concept at all -- reusing them with a meaningless dummy fd would
+// conflate "no fence" (a real, documented sentinel elsewhere in this file)
+// with "this message type never had an fd to begin with". A plain
+// write()/read() is simpler and more honest for a message with nothing to
+// carry. One struct serves both event kinds (pointer/key fields are
+// mutually exclusive, discriminated by `kind`) -- field duplication across
+// a small struct is cheap and avoids a union/variant across what is, in
+// effect, an ABI boundary between two processes.
+enum class input_kind : std::uint32_t
+{
+    pointer,
+    key,
+};
+
+struct input_msg
+{
+    input_kind kind{};
+    // pointer fields (kind == pointer) -- mirrors shell::input::pointer_event.
+    double x{};
+    double y{};
+    std::uint32_t phase{};
+    std::uint32_t buttons{};
+    std::uint32_t device{};
+    std::uint32_t pointer_device_kind{};
+    // key fields (kind == key).
+    std::uint32_t evdev_code{};
+    std::uint32_t key_down{}; // 0/1 -- not bool, to keep the wire struct's layout
+                              // unambiguous across the process boundary.
+};
+
+inline auto send_input(int fd, const input_msg& msg) -> result<void>
+{
+    const auto* p = reinterpret_cast<const char*>(&msg);
+    std::size_t remaining = sizeof(msg);
+    while (remaining > 0)
+    {
+        ssize_t n = write(fd, p, remaining);
+        if (n <= 0)
+            return unexpected(error{.code = error_code::system, .message = "write input_msg"});
+        p += n;
+        remaining -= static_cast<std::size_t>(n);
+    }
+    return {};
+}
+
+// false means EOF or error -- the peer is gone.
+inline auto recv_input(int fd, input_msg& msg) -> bool
+{
+    auto* p = reinterpret_cast<char*>(&msg);
+    std::size_t remaining = sizeof(msg);
+    while (remaining > 0)
+    {
+        ssize_t n = read(fd, p, remaining);
+        if (n <= 0)
+            return false;
+        p += n;
+        remaining -= static_cast<std::size_t>(n);
+    }
+    return true;
 }
 
 } // namespace shell::ipc
