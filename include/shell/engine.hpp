@@ -30,6 +30,7 @@
 #include <shell/renderer.hpp>
 #include <shell/result.hpp>
 #include <shell/stage.hpp>
+#include <shell/surface.hpp>
 #include <shell/textinput.hpp>
 #include <shell/texture.hpp>
 
@@ -44,6 +45,12 @@ struct config
     // engine in JIT mode against kernel_blob.bin in `assets` instead.
     std::string_view aot_library;
     renderer::type renderer{renderer::type::automatic};
+#ifdef SHELL_RENDERER_GL
+    // Share gl_ctx with another engine's already-created context (see
+    // shell::secondary_engine). EGL_NO_CONTEXT (default) preserves today's
+    // behavior exactly: every on-screen engine gets its own unshared context.
+    EGLContext share_context{EGL_NO_CONTEXT};
+#endif
 };
 
 // The Flutter engine wrapper.
@@ -68,6 +75,13 @@ struct state
     EGLContext gl_ctx{EGL_NO_CONTEXT};
     EGLContext resource_ctx{EGL_NO_CONTEXT};
     EGLContext upload_ctx{EGL_NO_CONTEXT};
+
+    // Headless/offscreen rendering (shell::secondary_engine). `offscreen`
+    // defaults false, which keeps detail::fbo's behavior (return 0, render
+    // to the window surface) byte-identical for every on-screen engine.
+    bool offscreen{};
+    std::uint32_t offscreen_color_tex{}; // set by the caller before init()
+    std::uint32_t offscreen_fbo{};       // lazily created by detail::fbo
 #endif
 
     texture::state textures;
@@ -76,6 +90,7 @@ struct state
     textinput::state ti;
     stage::registry stages;
     layer::registry layers;
+    surface::registry surfaces;
 
     std::mutex runner_mutex;
     std::condition_variable runner_cv;

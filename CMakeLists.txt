@@ -42,6 +42,14 @@ find_path(EGL_INCLUDE_DIR NAMES EGL/egl.h)
 find_library(EGL_LIBRARY NAMES EGL libEGL)
 find_path(GLES2_INCLUDE_DIR NAMES GLES2/gl2.h)
 find_library(GLES2_LIBRARY NAMES GLESv2 libGLESv2)
+# GBM is needed by shell::gbm/shell::child_renderer (process isolation,
+# Step 4) regardless of display backend -- a child app's off-screen
+# renderer opens /dev/dri/renderD128 directly, decoupled from whichever
+# backend the primary display uses. Probed here unconditionally; linked
+# below under OA_RENDERER=gl (it's meaningless without GL to render into
+# the buffers it allocates).
+find_path(GBM_INCLUDE_DIR NAMES gbm.h)
+find_library(GBM_LIBRARY NAMES gbm)
 add_compile_definitions(EGL_EGLEXT_PROTOTYPES)
 
 # The header-only shell framework.
@@ -64,8 +72,6 @@ if(OA_BACKEND STREQUAL "wayland")
   target_compile_definitions(shell_impl INTERFACE WL_EGL_PLATFORM=1)
   target_link_libraries(shell_impl INTERFACE PkgConfig::WAYLAND)
 elseif(OA_BACKEND STREQUAL "drm")
-  find_path(GBM_INCLUDE_DIR NAMES gbm.h)
-  find_library(GBM_LIBRARY NAMES gbm)
   find_path(DRM_MODESET_INCLUDE_DIR NAMES xf86drmMode.h)
   find_path(DRM_CORE_INCLUDE_DIR NAMES drm.h PATHS "${DRM_MODESET_INCLUDE_DIR}/.."
             PATH_SUFFIXES libdrm)
@@ -73,14 +79,22 @@ elseif(OA_BACKEND STREQUAL "drm")
   if(NOT GBM_LIBRARY OR NOT DRM_LIBRARY)
     message(FATAL_ERROR "drm backend requested but gbm/libdrm not found")
   endif()
+  # DRM backend needs GBM for its own scanout swapchain
+  # (gbm_surface_create et al, backend/drm.hpp) regardless of renderer --
+  # even drm+software allocates its front buffers through GBM. Linked here
+  # unconditionally on OA_BACKEND; the gl-renderer branch below links it
+  # again (harmlessly redundant when OA_BACKEND is also "drm") for
+  # shell::child_renderer's unrelated, backend-independent need (Step 4).
+  target_include_directories(shell_impl INTERFACE ${GBM_INCLUDE_DIR})
+  target_link_libraries(shell_impl INTERFACE ${GBM_LIBRARY})
   # DRM has no compositor of its own to supply input, so it reads directly
   # from libinput (M18).
   pkg_check_modules(LIBINPUT REQUIRED IMPORTED_TARGET libinput)
   pkg_check_modules(LIBUDEV REQUIRED IMPORTED_TARGET libudev)
   target_compile_definitions(shell_impl INTERFACE SHELL_BACKEND_DRM=1)
   target_include_directories(shell_impl INTERFACE
-    ${GBM_INCLUDE_DIR} ${DRM_MODESET_INCLUDE_DIR} ${DRM_CORE_INCLUDE_DIR})
-  target_link_libraries(shell_impl INTERFACE ${GBM_LIBRARY} ${DRM_LIBRARY}
+    ${DRM_MODESET_INCLUDE_DIR} ${DRM_CORE_INCLUDE_DIR})
+  target_link_libraries(shell_impl INTERFACE ${DRM_LIBRARY}
     PkgConfig::LIBINPUT PkgConfig::LIBUDEV)
 else()
   message(FATAL_ERROR "Unknown OA_BACKEND '${OA_BACKEND}'")
@@ -88,8 +102,12 @@ endif()
 
 # --- renderer selection ------------------------------------------------------
 if(OA_RENDERER STREQUAL "gl")
+  if(NOT GBM_LIBRARY)
+    message(FATAL_ERROR "gl renderer requested but gbm not found (needed by shell::child_renderer, Step 4)")
+  endif()
   target_compile_definitions(shell_impl INTERFACE SHELL_RENDERER_GL=1)
-  target_link_libraries(shell_impl INTERFACE ${EGL_LIBRARY} ${GLES2_LIBRARY})
+  target_include_directories(shell_impl INTERFACE ${GBM_INCLUDE_DIR})
+  target_link_libraries(shell_impl INTERFACE ${EGL_LIBRARY} ${GLES2_LIBRARY} ${GBM_LIBRARY})
 elseif(OA_RENDERER STREQUAL "software")
   # no EGL/GLES needed
 else()

@@ -48,6 +48,17 @@ inline auto get(registry& r, id sid) -> state*
     return it == r.end() ? nullptr : &it->second;
 }
 
+// Step 3 assumes at most one visible surface per layer. Linear scan is
+// fine -- registries here are a handful of entries, same cost class as
+// engine::encode_layers_snapshot's existing sort.
+inline auto find_by_layer(const registry& r, layer::id lid) -> const state*
+{
+    for (const auto& [sid, s] : r)
+        if (s.layer == lid && s.visible)
+            return &s;
+    return nullptr;
+}
+
 inline auto attach_texture(state& s, texture::id tid) -> void
 {
     s.texture = tid;

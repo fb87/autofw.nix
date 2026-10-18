@@ -14,8 +14,11 @@
 #include <utility>
 #include <vector>
 
+#include <shell/child_renderer.hpp> // self-guards with #ifdef SHELL_RENDERER_GL
 #include <shell/engine.hpp>
+#include <shell/isolated_app.hpp> // self-guards with #ifdef SHELL_RENDERER_GL
 #include <shell/renderer.hpp>
+#include <shell/secondary_engine.hpp> // self-guards with #ifdef SHELL_RENDERER_GL
 #include <shell/shell.hpp>
 #ifdef SHELL_BACKEND_WAYLAND
 #include <shell/backend/wayland.hpp>
@@ -36,8 +39,20 @@ struct options
     bool test_texture{};
     bool test_input{};
     bool test_layers{};
+    bool test_secondary_engine{};
+    bool test_isolated_app{};
     std::vector<std::string> display_specs;      // raw "--display key=val,..." strings
     std::vector<std::string> input_device_specs;  // raw "--input-device match=idx" strings
+
+    // --child-renderer mode (Step 4: process-level isolation) -- this
+    // process IS the isolated child, not a display-owning shell at all;
+    // see the top-of-main() dispatch. Hidden (not in --help): spawned only
+    // by shell::ipc::spawn_child, under the same shell_app binary, never
+    // meant to be typed by a human.
+    bool child_renderer{};
+    std::uint32_t child_width{1280};
+    std::uint32_t child_height{720};
+    int child_ipc_fd{-1};
 };
 
 // One requested display. Populated either from legacy top-level flags (zero
@@ -91,6 +106,18 @@ void print_usage(const char* prog)
         "  --test-layers    drive a scripted sequence of layer add/visibility/\n"
         "                   opacity/remove changes to exercise the shell/layers\n"
         "                   channel (primary display)\n"
+        "  --test-secondary-engine\n"
+        "                   (GL renderer only) spawn two headless secondary\n"
+        "                   Flutter engines and attach them, as live textures,\n"
+        "                   to the 'application' and 'overlay' layers from\n"
+        "                   --test-layers' scripted sequence (implies\n"
+        "                   --test-layers; primary display)\n"
+        "  --test-isolated-app\n"
+        "                   (GL renderer only) spawn a real OS-process-\n"
+        "                   isolated Flutter app (shell::isolated_app) and\n"
+        "                   attach it, as a live texture, to the\n"
+        "                   'application' layer from --test-layers' scripted\n"
+        "                   sequence (implies --test-layers; primary display)\n"
         "  --help           show this help\n",
         prog);
 }
@@ -99,6 +126,12 @@ enum
 {
     kOptDisplay = 256,
     kOptInputDevice = 257,
+    kOptTestSecondaryEngine = 258,
+    kOptTestIsolatedApp = 259,
+    kOptChildRenderer = 260,
+    kOptChildWidth = 261,
+    kOptChildHeight = 262,
+    kOptChildIpcFd = 263,
 };
 
 options parse_args(int argc, char** argv)
@@ -114,6 +147,14 @@ options parse_args(int argc, char** argv)
         {"test-texture", no_argument, nullptr, 't'},
         {"test-input", no_argument, nullptr, 'x'},
         {"test-layers", no_argument, nullptr, 'L'},
+        {"test-secondary-engine", no_argument, nullptr, kOptTestSecondaryEngine},
+        {"test-isolated-app", no_argument, nullptr, kOptTestIsolatedApp},
+        // Hidden child-renderer-mode flags -- not listed in print_usage(),
+        // see the options::child_renderer doc comment.
+        {"child-renderer", no_argument, nullptr, kOptChildRenderer},
+        {"width", required_argument, nullptr, kOptChildWidth},
+        {"height", required_argument, nullptr, kOptChildHeight},
+        {"ipc-fd", required_argument, nullptr, kOptChildIpcFd},
         {"help", no_argument, nullptr, 'h'},
         {nullptr, 0, nullptr, 0},
     };
@@ -152,6 +193,26 @@ options parse_args(int argc, char** argv)
             break;
         case 'L':
             out.test_layers = true;
+            break;
+        case kOptTestSecondaryEngine:
+            out.test_secondary_engine = true;
+            out.test_layers = true; // the layers it attaches to must exist.
+            break;
+        case kOptTestIsolatedApp:
+            out.test_isolated_app = true;
+            out.test_layers = true; // the layer it attaches to must exist.
+            break;
+        case kOptChildRenderer:
+            out.child_renderer = true;
+            break;
+        case kOptChildWidth:
+            out.child_width = static_cast<std::uint32_t>(std::stoul(optarg));
+            break;
+        case kOptChildHeight:
+            out.child_height = static_cast<std::uint32_t>(std::stoul(optarg));
+            break;
+        case kOptChildIpcFd:
+            out.child_ipc_fd = std::stoi(optarg);
             break;
         case 'h':
         default:
@@ -499,6 +560,147 @@ void run_layer_test(shell::engine::state* e, bool* running)
     *running = false;
 }
 
+#ifdef SHELL_RENDERER_GL
+// Spawns TWO headless secondary engines (zero-copy GL texture sharing, see
+// shell/secondary_engine.hpp) and attaches each as a live texture to one of
+// run_layer_test's scripted layers -- "application" (id 2) and "overlay"
+// (id 3). Two, not one: this is the only way to actually exercise "per-layer"
+// (plural) rather than resting on architecture-by-inspection, and it proves
+// two independent engines each get their own lazily-created FBO in the same
+// share group without interfering. Used as `--test-secondary-engine`
+// (implies --test-layers; primary display only).
+void run_secondary_engine_test(shell::engine::state* primary, const options& opts,
+                               bool* running)
+{
+    // Run after run_layer_test's add sequence (background/application/
+    // overlay are all added within the first ~1s of its own 3s initial
+    // sleep) but before it removes the background layer, so both target
+    // layers are guaranteed to exist by the time we attach to them.
+    std::this_thread::sleep_for(std::chrono::seconds(4));
+
+    constexpr shell::layer::id kApplicationId = 2;
+    constexpr shell::layer::id kOverlayId = 3;
+    constexpr shell::texture::id kAppTextureId = 900;
+    constexpr shell::texture::id kOverlayTextureId = 901;
+    constexpr shell::surface::id kAppSurfaceId = 1;
+    constexpr shell::surface::id kOverlaySurfaceId = 2;
+
+    struct slot
+    {
+        const char* label;
+        shell::layer::id layer;
+        shell::texture::id texture;
+        shell::surface::id surface;
+        std::uint32_t width, height;
+        shell::secondary_engine::state engine; // contains std::atomic/mutex -- not
+        bool spawned{};                        // copyable or movable, so this can
+    };                                          // never live in a std::vector<slot>
+                                                 // (reserve()/emplace_back() both
+                                                 // require a well-formed move ctor
+                                                 // even when never actually called).
+    slot app_slot{"app", kApplicationId, kAppTextureId, kAppSurfaceId, 400, 300};
+    slot overlay_slot{"overlay", kOverlayId, kOverlayTextureId, kOverlaySurfaceId, 300, 200};
+    slot* slots[] = {&app_slot, &overlay_slot};
+
+    for (slot* s : slots)
+    {
+        if (!shell::engine::register_texture(*primary, s->texture))
+        {
+            shell::log::info(std::string("[test-secondary-engine] register_texture(") +
+                             s->label + ") failed");
+            continue;
+        }
+        shell::secondary_engine::config cfg{
+            .assets = opts.assets, .icu_data = opts.icu, .aot_library = opts.aot_lib,
+            .width = s->width, .height = s->height, .pixel_ratio = 1.0, .fps = 60.0,
+            .log_tag = std::string("sec-") + s->label, .primary = primary,
+            .target_texture = s->texture,
+        };
+        if (auto err = shell::secondary_engine::create(s->engine, cfg); !err)
+        {
+            shell::log::info(std::string("[test-secondary-engine] create(") + s->label +
+                             ") failed: " + err.error().message);
+            shell::engine::unregister_texture(*primary, s->texture);
+            continue;
+        }
+        shell::engine::attach_surface(
+            *primary, shell::surface::state{.value = s->surface, .layer = s->layer,
+                                            .size = {s->width, s->height},
+                                            .texture = s->texture, .visible = true});
+        s->spawned = true;
+        shell::log::info(std::string("[test-secondary-engine] ") + s->label + " attached");
+    }
+
+    std::this_thread::sleep_for(std::chrono::seconds(6));
+
+    for (slot* s : slots)
+    {
+        if (!s->spawned)
+            continue;
+        shell::engine::detach_surface(*primary, s->surface);
+        shell::secondary_engine::destroy(s->engine);
+        shell::engine::unregister_texture(*primary, s->texture);
+    }
+    shell::log::info("[test-secondary-engine] torn down");
+    *running = false;
+}
+
+// Spawns ONE real OS-process-isolated Flutter app (shell::isolated_app --
+// a genuinely separate child process, not an in-process secondary engine)
+// and attaches it, as a live texture, to run_layer_test's "application"
+// layer (id 2) -- distinct texture/surface ids from
+// run_secondary_engine_test's so the two tests can run back to back
+// without colliding. Used as `--test-isolated-app` (implies --test-layers;
+// primary display only).
+void run_isolated_app_test(shell::engine::state* primary, const options& opts, bool* running)
+{
+    std::this_thread::sleep_for(std::chrono::seconds(4));
+
+    constexpr shell::layer::id kLayerId = 2; // "application"
+    constexpr shell::texture::id kTextureId = 950;
+    constexpr shell::surface::id kSurfaceId = 3;
+    constexpr std::uint32_t kWidth = 400;
+    constexpr std::uint32_t kHeight = 300;
+
+    if (!shell::engine::register_texture(*primary, kTextureId))
+    {
+        shell::log::info("[test-isolated-app] register_texture failed");
+        *running = false;
+        return;
+    }
+
+    shell::isolated_app::state app;
+    shell::isolated_app::config cfg{
+        .assets = opts.assets, .icu_data = opts.icu, .aot_library = opts.aot_lib,
+        .width = kWidth, .height = kHeight, .log_tag = "iso", .primary = primary,
+        .target_texture = kTextureId,
+    };
+    if (auto err = shell::isolated_app::create(app, cfg); !err)
+    {
+        shell::log::info("[test-isolated-app] create failed: " + err.error().message);
+        shell::engine::unregister_texture(*primary, kTextureId);
+        *running = false;
+        return;
+    }
+    // Logged so an external test script can target this exact process for
+    // the kill -SEGV containment test -- the whole payoff of Step 4.
+    shell::log::info("[test-isolated-app] child pid=" + std::to_string(app.child.pid));
+    shell::engine::attach_surface(
+        *primary, shell::surface::state{.value = kSurfaceId, .layer = kLayerId,
+                                        .size = {kWidth, kHeight}, .texture = kTextureId,
+                                        .visible = true});
+    shell::log::info("[test-isolated-app] attached");
+
+    std::this_thread::sleep_for(std::chrono::seconds(8));
+
+    shell::engine::detach_surface(*primary, kSurfaceId);
+    shell::isolated_app::destroy(app); // safe no-op if the child already died.
+    shell::engine::unregister_texture(*primary, kTextureId);
+    shell::log::info("[test-isolated-app] torn down");
+    *running = false;
+}
+#endif // SHELL_RENDERER_GL
+
 // Runs one display's full engine+backend lifecycle on the calling thread;
 // blocks on that backend's run() loop. Intended to be invoked once per
 // display_spec, each on its own std::thread. Any failure (startup or
@@ -666,6 +868,34 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
             });
     }
 
+#ifdef SHELL_RENDERER_GL
+    std::thread sectest;
+    bool sectest_running = false;
+    if (spec.primary && opts.test_secondary_engine)
+    {
+        sectest_running = true;
+        sectest = std::thread(
+            [&engine, &opts, &sectest_running, tag]
+            {
+                shell::log::set_tag(tag);
+                run_secondary_engine_test(&engine, opts, &sectest_running);
+            });
+    }
+
+    std::thread isotest;
+    bool isotest_running = false;
+    if (spec.primary && opts.test_isolated_app)
+    {
+        isotest_running = true;
+        isotest = std::thread(
+            [&engine, &opts, &isotest_running, tag]
+            {
+                shell::log::set_tag(tag);
+                run_isolated_app_test(&engine, opts, &isotest_running);
+            });
+    }
+#endif
+
 #ifdef SHELL_BACKEND_WAYLAND
     shell::backend::wayland::run(backend);
 #else
@@ -692,6 +922,18 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
         layertest_running = false;
         layertest.join();
     }
+#ifdef SHELL_RENDERER_GL
+    if (sectest.joinable())
+    {
+        sectest_running = false;
+        sectest.join();
+    }
+    if (isotest.joinable())
+    {
+        isotest_running = false;
+        isotest.join();
+    }
+#endif
 
 #ifndef SHELL_BACKEND_WAYLAND
     if (router)
@@ -746,6 +988,24 @@ int main(int argc, char** argv)
             }
         }
     }
+
+#ifdef SHELL_RENDERER_GL
+    // This process IS the isolated child (Step 4), not a display-owning
+    // shell -- bypasses all Wayland/DRM display logic entirely. Spawned
+    // only by shell::ipc::spawn_child (see shell::isolated_app), never a
+    // normal top-level invocation.
+    if (opts.child_renderer)
+    {
+        shell::child_renderer::config cfg{.assets = opts.assets,
+                                          .icu_data = opts.icu,
+                                          .aot_library = opts.aot_lib,
+                                          .width = opts.child_width,
+                                          .height = opts.child_height,
+                                          .log_tag = "child",
+                                          .ipc_fd = opts.child_ipc_fd};
+        return shell::child_renderer::run(cfg);
+    }
+#endif
 
     std::vector<display_spec> displays = build_displays(opts);
     if (!validate_and_default_primary(displays))

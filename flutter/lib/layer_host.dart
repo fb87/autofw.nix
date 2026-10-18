@@ -3,12 +3,13 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'layer.dart';
+import 'native_surface.dart';
 import 'stage.dart';
 
 /// One decoded `shell/layers` entry. Field order matches
 /// `shell::engine::encode_layer` (include/shell/engine_impl.hpp) exactly:
 /// [id, stage, role, x*1000, y*1000, width*1000, height*1000,
-///  opacity*1000, visible, z].
+///  opacity*1000, visible, z, textureId].
 class ShellLayerData {
   const ShellLayerData({
     required this.id,
@@ -21,10 +22,12 @@ class ShellLayerData {
     required this.opacity,
     required this.visible,
     required this.z,
+    required this.textureId,
   });
 
   factory ShellLayerData.fromWire(List<dynamic> fields) {
     double scaled(int i) => (fields[i] as int) / 1000.0;
+    final rawTextureId = fields[10] as int;
     return ShellLayerData(
       id: fields[0] as int,
       stage: fields[1] as int,
@@ -36,6 +39,9 @@ class ShellLayerData {
       opacity: scaled(7),
       visible: fields[8] as bool,
       z: fields[9] as int,
+      // -1 is the "no surface attached" sentinel (shell::surface::id is
+      // unsigned on the C++ side; -1 is never a real id).
+      textureId: rawTextureId < 0 ? null : rawTextureId,
     );
   }
 
@@ -49,6 +55,10 @@ class ShellLayerData {
   final double opacity;
   final bool visible;
   final int z;
+  // Step 3: set when a secondary engine's surface is attached to this
+  // layer (shell::engine::attach_surface). Null means "no live surface
+  // content yet" -- the placeholder box is shown instead.
+  final int? textureId;
 }
 
 // Mirrors shell::layer::role (include/shell/layer.hpp) by ordinal.
@@ -122,7 +132,8 @@ class _ShellLayerHostState extends State<ShellLayerHost> {
     for (final l in layers) {
       debugPrint('[layer] id=${l.id} role=${_roleNames[l.role]} '
           'visible=${l.visible} opacity=${l.opacity.toStringAsFixed(2)} '
-          'bounds=(${l.x},${l.y},${l.width}x${l.height}) z=${l.z}');
+          'bounds=(${l.x},${l.y},${l.width}x${l.height}) z=${l.z} '
+          'textureId=${l.textureId}');
     }
     if (!mounted) return;
     setState(() => _layers = layers);
@@ -142,15 +153,17 @@ class _ShellLayerHostState extends State<ShellLayerHost> {
               height: l.height,
               visible: l.visible,
               opacity: l.opacity,
-              child: Container(
-                color: _roleColors[l.role].withValues(alpha: 0.65),
-                alignment: Alignment.center,
-                child: Text(
-                  'layer ${l.id}\n${_roleNames[l.role]}',
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Color(0xFFFFFFFF)),
-                ),
-              ),
+              child: l.textureId != null
+                  ? NativeSurface(textureId: l.textureId!)
+                  : Container(
+                      color: _roleColors[l.role].withValues(alpha: 0.65),
+                      alignment: Alignment.center,
+                      child: Text(
+                        'layer ${l.id}\n${_roleNames[l.role]}',
+                        textAlign: TextAlign.center,
+                        style: const TextStyle(color: Color(0xFFFFFFFF)),
+                      ),
+                    ),
             ),
         ],
       ),

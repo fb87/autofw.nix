@@ -90,6 +90,23 @@ inline auto has(state& s, id texture_id) -> bool
 }
 
 #ifdef SHELL_RENDERER_GL
+// Points texture_id's entry at an already-existing GL texture name (one
+// created once, up front, from a context in the target engine's share
+// group -- see shell::secondary_engine) instead of allocating a new one
+// via ensure_texture. Overwrites any prior entry for texture_id.
+inline auto bind_external(state& s, id texture_id, std::uint32_t gl_name,
+                          std::uint32_t width, std::uint32_t height) -> void
+{
+    std::lock_guard lock(s.mutex);
+    entry& e = s.map[texture_id];
+    e.gl_name = gl_name;
+    e.gl_target = GL_TEXTURE_2D;
+    e.gl_format = 0x8058;
+    e.width = width;
+    e.height = height;
+    e.ready = true;
+}
+
 inline auto ensure_texture(state& s, id texture_id, std::uint32_t width,
                            std::uint32_t height) -> bool
 {
@@ -227,13 +244,42 @@ struct dmabuf_image
     std::uint32_t gl_texture{};
 };
 
+namespace detail
+{
+// eglCreateImageKHR/eglDestroyImageKHR are declared in eglext.h (EGLAPI
+// prototypes, visible via EGL_EGLEXT_PROTOTYPES) but are not linkable
+// symbols in -lEGL on this toolchain/libglvnd -- confirmed by a real link
+// failure exercising this code for the first time (zero prior callers).
+// Resolved via eglGetProcAddress instead, the same way this function
+// already resolves glEGLImageTargetTexture2DOES below.
+using PFNEGLCREATEIMAGEKHR = EGLImageKHR (*)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer,
+                                             const EGLint*);
+using PFNEGLDESTROYIMAGEKHR = EGLBoolean (*)(EGLDisplay, EGLImageKHR);
+
+inline auto create_image_khr() -> PFNEGLCREATEIMAGEKHR
+{
+    return reinterpret_cast<PFNEGLCREATEIMAGEKHR>(eglGetProcAddress("eglCreateImageKHR"));
+}
+inline auto destroy_image_khr() -> PFNEGLDESTROYIMAGEKHR
+{
+    return reinterpret_cast<PFNEGLDESTROYIMAGEKHR>(eglGetProcAddress("eglDestroyImageKHR"));
+}
+} // namespace detail
+
 inline auto import_dmabuf(EGLDisplay dpy, const dmabuf& buf, EGLint width,
                           EGLint height, std::uint32_t* gl_name_out) -> dmabuf_image
 {
     dmabuf_image out{};
     if (buf.planes.empty() || buf.planes.front().fd < 0)
         return out;
+    auto create_image = detail::create_image_khr();
+    if (!create_image)
+        return out;
     const dmabuf_plane& p = buf.planes.front();
+    // EGL_DMA_BUF_PLANE0_PITCH_EXT (p.stride) is required, not optional:
+    // GBM-allocated buffer stride is frequently larger than width * bpp
+    // due to GPU alignment, so omitting it silently misinterprets the
+    // buffer's content for any buffer with padding.
     const EGLint attribs[] = {EGL_WIDTH,
                               width,
                               EGL_HEIGHT,
@@ -244,9 +290,10 @@ inline auto import_dmabuf(EGLDisplay dpy, const dmabuf& buf, EGLint width,
                               p.fd,
                               EGL_DMA_BUF_PLANE0_OFFSET_EXT,
                               static_cast<EGLint>(p.offset),
+                              EGL_DMA_BUF_PLANE0_PITCH_EXT,
+                              static_cast<EGLint>(p.stride),
                               EGL_NONE};
-    out.image =
-        eglCreateImageKHR(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
+    out.image = create_image(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, nullptr, attribs);
     if (out.image == EGL_NO_IMAGE_KHR)
         return out;
     glGenTextures(1, &out.gl_texture);
@@ -267,8 +314,9 @@ inline auto release_image(EGLDisplay dpy, dmabuf_image& img) -> void
 {
     if (img.gl_texture)
         glDeleteTextures(1, &img.gl_texture);
-    if (img.image)
-        eglDestroyImageKHR(dpy, img.image);
+    auto destroy_image = detail::destroy_image_khr();
+    if (img.image && destroy_image)
+        destroy_image(dpy, img.image);
     img.image = EGL_NO_IMAGE_KHR;
     img.gl_texture = 0;
 }

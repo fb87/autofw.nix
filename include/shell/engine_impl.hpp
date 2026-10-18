@@ -8,6 +8,10 @@
 #include <span>
 #include <vector>
 
+#ifdef SHELL_RENDERER_GL
+#include <GLES2/gl2.h>
+#endif
+
 namespace shell::engine
 {
 namespace detail
@@ -19,7 +23,16 @@ bool make_current(void* d)
     auto* s = static_cast<state*>(d);
     EGLDisplay dpy = static_cast<EGLDisplay>(s->out->egl_display);
     EGLSurface surf = static_cast<EGLSurface>(s->out->egl_surface);
-    if (surf == EGL_NO_SURFACE || dpy == EGL_NO_DISPLAY || s->gl_ctx == EGL_NO_CONTEXT)
+    // Offscreen engines (shell::child_renderer, Step 4) may legitimately
+    // have no EGLSurface at all, via EGL_KHR_surfaceless_context -- e.g.
+    // Mesa's EGL_PLATFORM_GBM_KHR display exposes zero EGL_PBUFFER_BIT
+    // configs (confirmed empirically: all configs report EGL_WINDOW_BIT
+    // only), so a headless engine there has no surface to create in the
+    // first place. On-screen engines (offscreen == false, the default)
+    // keep the exact same strict guard as before -- zero behavior change
+    // for them.
+    if ((surf == EGL_NO_SURFACE && !s->offscreen) || dpy == EGL_NO_DISPLAY ||
+        s->gl_ctx == EGL_NO_CONTEXT)
         return false;
     eglBindAPI(EGL_OPENGL_ES_API);
     return eglMakeCurrent(dpy, surf, surf, s->gl_ctx) == EGL_TRUE;
@@ -39,9 +52,39 @@ bool present(void* d)
     return static_cast<state*>(d)->out->present(static_cast<state*>(d)->out->state);
 }
 
-std::uint32_t fbo(void*)
+// Default: render into the window surface's own default framebuffer
+// (byte-identical for every on-screen engine, unchanged from before this
+// field existed). Offscreen engines (shell::secondary_engine) instead get
+// a lazily-created FBO with a shared GL texture attached as its color
+// target -- lazy because the FBO *container* object is not itself shared
+// across a GL share-group (only its attachments are), so it must be built
+// inside this engine's own context, which this callback only ever runs
+// with already current.
+std::uint32_t fbo(void* d)
 {
-    return 0;
+    auto* s = static_cast<state*>(d);
+    if (!s->offscreen)
+        return 0;
+    if (s->offscreen_fbo == 0)
+    {
+        glGenFramebuffers(1, &s->offscreen_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, s->offscreen_fbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                               s->offscreen_color_tex, 0);
+        // Depth-only (core GLES2, no extension) -- matches choose_config()'s
+        // own EGL_DEPTH_SIZE=16 request for on-screen surfaces. No stencil
+        // attachment: unclear yet whether this engine version's GL backend
+        // needs one; add GL_OES_packed_depth_stencil only if visual
+        // clipping artifacts show up during verification.
+        std::uint32_t depth_rb{};
+        glGenRenderbuffers(1, &depth_rb);
+        glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, s->out->width,
+                              s->out->height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER,
+                                  depth_rb);
+    }
+    return s->offscreen_fbo;
 }
 
 bool make_resource_current(void* d)
@@ -200,7 +243,7 @@ inline auto init(state& s) -> result<void>
     {
         EGLDisplay dpy = static_cast<EGLDisplay>(s.out->egl_display);
         EGLConfig cfg = static_cast<EGLConfig>(s.out->egl_config);
-        s.gl_ctx = egl::create_context(dpy, cfg, EGL_NO_CONTEXT);
+        s.gl_ctx = egl::create_context(dpy, cfg, s.cfg.share_context);
         if (s.gl_ctx == EGL_NO_CONTEXT)
         {
             return unexpected(error{.code = error_code::egl, .message = "gl context"});
@@ -482,7 +525,8 @@ inline auto destroy(state& s) -> void
 }
 
 // --- stage / layer -----------------------------------------------------------
-inline auto encode_layer(const layer::state& l) -> std::vector<std::uint8_t>
+inline auto encode_layer(const layer::state& l, const surface::registry& surfaces)
+    -> std::vector<std::uint8_t>
 {
     std::vector<std::vector<std::uint8_t>> fields;
     fields.push_back(codec::encode_int64(static_cast<std::int64_t>(l.value)));
@@ -503,6 +547,12 @@ inline auto encode_layer(const layer::state& l) -> std::vector<std::uint8_t>
     fields.push_back(codec::encode_int64(static_cast<std::int64_t>(l.opacity * 1000)));
     fields.push_back(codec::encode_bool(l.visible));
     fields.push_back(codec::encode_int64(layer::z_of(l.kind)));
+    // Field 10: the attached surface's texture id, or -1 if this layer has
+    // no live surface (Step 3: per-layer secondary engines). -1 round-trips
+    // fine through encode_int64 (two's-complement signed 64-bit).
+    const auto* surf = surface::find_by_layer(surfaces, l.value);
+    fields.push_back(codec::encode_int64(
+        surf ? static_cast<std::int64_t>(surf->texture) : std::int64_t{-1}));
     return codec::encode_list(fields);
 }
 
@@ -518,7 +568,7 @@ inline auto encode_layers_snapshot(state& s) -> std::vector<std::uint8_t>
     std::vector<std::vector<std::uint8_t>> items;
     items.reserve(sorted.size());
     for (const auto* l : sorted)
-        items.push_back(encode_layer(*l));
+        items.push_back(encode_layer(*l, s.surfaces));
     return codec::encode_list(items);
 }
 
@@ -602,6 +652,23 @@ inline auto set_layer_bounds(state& s, layer::id lid, layer::geometry bounds) ->
     layer::set_bounds(*l, bounds);
     push_layers(s);
     return true;
+}
+
+// --- surfaces (Step 3: per-layer secondary engines) ---------------------------
+inline auto attach_surface(state& s, const surface::state& surf) -> bool
+{
+    bool ok = surface::add(s.surfaces, surf);
+    if (ok)
+        push_layers(s); // the attached texture id rides along in the next snapshot.
+    return ok;
+}
+
+inline auto detach_surface(state& s, surface::id sid) -> bool
+{
+    bool ok = surface::remove(s.surfaces, sid);
+    if (ok)
+        push_layers(s);
+    return ok;
 }
 
 // --- vsync / input -----------------------------------------------------------
@@ -841,6 +908,14 @@ inline auto unregister_texture(state& s, texture::id id) -> result<void>
     FlutterEngineUnregisterExternalTexture(s.fl, id);
     texture::unregister_id(s.textures, id);
     return {};
+}
+
+// Tells this engine a registered texture's backing content changed, without
+// moving any pixels -- used by shell::secondary_engine's zero-copy bridge
+// (the GL texture is already shared; this just triggers a re-composite).
+inline auto mark_texture_available(state& s, texture::id id) -> bool
+{
+    return FlutterEngineMarkExternalTextureFrameAvailable(s.fl, id) == kSuccess;
 }
 
 inline auto push_texture_frame(state& s, texture::id id, std::uint32_t w,

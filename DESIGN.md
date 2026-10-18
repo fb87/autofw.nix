@@ -207,8 +207,9 @@ engine + backend output per display, each with its own private
 stage/layer registry (section 9/10 above apply per-display, unchanged).
 A crash in one display's Dart code stays isolated to that display's engine
 instance; a crash in the shared native process (e.g. a native segfault)
-still takes down every display -- this is in-process isolation, not
-OS-process isolation (that is a later roadmap step).
+still takes down every display -- this is in-process isolation. A single
+layer *within* one display's engine can additionally get real OS-process
+isolation instead -- see "9.2 Process isolation" below.
 
 Every display currently runs the *same* asset bundle
 (`--assets`/`--icu`/`--aot-lib` are process-wide, not per-display); serving
@@ -258,6 +259,119 @@ devices to specific displays; decoded events are sent directly to that
 display's engine (`engine::send_pointer`/`send_key`, safe to call from any
 thread since they internally marshal onto that engine's own platform
 runner thread).
+
+## 9.2 Process isolation
+
+A single layer within one display's primary engine can run its Flutter
+content in a genuinely separate OS process (`shell::isolated_app`), not
+just a separate Dart isolate or a separate same-process engine
+(`shell::secondary_engine`, the in-process sibling of this mechanism: a
+headless Flutter engine sharing a GL context group with the primary,
+zero-copy, but still inside the one native process -- a native crash there
+still takes the whole process down, same as section 9.1's per-display
+isolation). A native crash (segfault, abort, OOM-kill, ...) in an
+isolated-process layer is contained to that one layer; every other
+layer/display and the shell process itself keep running.
+
+```text
+primary process                          isolated child process
+----------------                         -----------------------
+shell_app --display ...                  shell_app --child-renderer
+  engine::state (primary)                  --ipc-fd=N --width=W --height=H
+    |                                      --assets=... --icu=... [--aot-lib=...]
+    | isolated_app::create()
+    |   ipc::spawn_child()  -- socketpair + fork + execv,
+    |                          same binary, re-exec'd --------->  shell::child_renderer::run()
+    |                                                               GBM render node
+    |                                                               (/dev/dri/renderD128,
+    |                                                               decoupled from the
+    |                                                               primary's own display
+    |                                                               backend) -> 3 dma-buf-
+    |                                                               backed ring buffers,
+    |                                                               GBM_BO_USE_LINEAR
+    |                                                               headless engine::state
+    |                                                               (offscreen=true,
+    |                                                               surfaceless EGL context,
+    |                                                               no window surface)
+    |   ipc::recv_handshake()  <--- one-time: dimensions/format/
+    |     (SCM_RIGHTS, N fds)       stride + N dma-buf fds
+    |   texture::import_dmabuf() x N, in a context sharing with
+    |     primary.gl_ctx (never primary.gl_ctx itself -- that's
+    |     Flutter's own, used on its own threads)
+    |   texture::bind_external(primary.textures, target_texture, ...)
+    |
+    |   receiver thread:
+    |     ipc::recv_frame_ready()  <--- per frame: {buffer_index,
+    |       (SCM_RIGHTS, 1 fd =       frame_number} + an EGL native
+    |        acquire fence)           fence fd (EGL_ANDROID_native_
+    |     egl::wait_fence_cpu()       fence_sync) -- "GPU done
+    |       (poll() on the sync_      writing this buffer"
+    |        file fd -- this
+    |        thread has no GL
+    |        context actively
+    |        doing the real read,
+    |        so a GPU-side
+    |        eglWaitSyncKHR has
+    |        nothing useful to
+    |        wait inside)
+    |     texture::bind_external()  -- repoint at the new buffer
+    |     engine::mark_texture_available()
+    |     egl::create_fence() + ipc::send_buffer_released()
+    |       (SCM_RIGHTS, 1 fd) ------------------------------>  egl::wait_fence()
+    |                                                             (GPU-side wait, cheap,
+    |                                                             before reusing this
+    |                                                             buffer slot)
+    |
+    |   child dies (any reason) -> socket EOF -> recv_frame_ready()
+    |   returns false -> waitpid() -> log WIFSIGNALED/WTERMSIG ->
+    |   stop, WITHOUT touching stop_all
+```
+
+Same downstream integration point section 9.1/12's in-process paths use:
+`texture::bind_external` + `engine::mark_texture_available` +
+`engine::register_texture`/`unregister_texture`. Process isolation only
+changes *how a GL texture name gets populated* (dma-buf import across a
+real process boundary instead of a shared GL context within one process),
+not what happens after.
+
+Explicit GPU synchronization (required by section 12, "do not design the
+production path around `glFinish()`") uses `EGL_ANDROID_native_fence_sync`
+in both directions over the same full-duplex IPC socket: the child's
+`frame_ready` message carries an *acquire* fence ("I'm done writing"), the
+parent's `buffer_released` message carries a *release* fence ("I'm done
+reading, safe to overwrite"). The parent's wait is CPU-side (`poll()` on
+the fence's underlying sync_file fd) rather than GPU-side, because the
+thread that notices a new frame is not the thread that actually samples
+the texture -- Flutter's own rasterizer does that later, asynchronously,
+on its own GL context. The release fence sent back to the child is
+correspondingly a documented approximation: created right after
+`mark_texture_available` rather than genuinely after the primary's
+rasterizer finishes reading, because the embedder API exposes no
+per-external-texture frame-completion hook to key a precise fence off of.
+In practice this is safe: a 3-buffer ring means a given slot isn't due for
+reuse again until the child has produced two more frames, comfortably
+longer than one vsync period.
+
+The child process is the same `shell_app` binary, re-exec'd with hidden
+flags (`--child-renderer --ipc-fd=N --width=W --height=H`, plus the normal
+`--assets`/`--icu`/`--aot-lib`) rather than a separate dedicated binary --
+consistent with every other mode in this codebase. These flags are not
+listed in `--help`; nothing spawns a process with them except
+`shell::ipc::spawn_child`.
+
+No auto-restart on crash: an isolated layer that dies stays blank
+(detached) until the owning layer/surface lifecycle explicitly recreates
+it. This first cut optimizes for "a crash is contained and visible," not
+"a crash self-heals."
+
+Not yet implemented: multi-GPU dma-buf import (the child's render node and
+the primary's display GPU are assumed to be the same physical device --
+true on this project's target single-SoC-GPU automotive hardware, and on
+every sandbox this was verified against); a plugin-manifest-level policy
+for *which* layers get process isolation vs. the in-process
+`shell::secondary_engine` path (today it is a direct API choice made by
+whatever spawns the layer, not a declarative plugin property -- see
+section 13's "Level 3").
 
 ## 10. Layer
 
@@ -382,6 +496,12 @@ C++ ABI and STL types must never cross the dynamic plugin boundary.
 
 Optional future support for additional Flutter engines when genuine isolation
 is required. Level 3 must not influence the initial architecture.
+
+The underlying mechanism -- a layer backed by a genuinely separate Flutter
+engine, in-process (`shell::secondary_engine`) or in a separate OS process
+(`shell::isolated_app`) -- exists today; see section 9.2. What Level 3 still
+lacks is a declarative plugin-manifest surface for requesting it (section
+14's `[ui] stage=/layer=` placement has no isolation-level field yet).
 
 ## 14. Plugin placement
 
