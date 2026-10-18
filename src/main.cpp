@@ -44,6 +44,17 @@ struct options
     bool test_isolated_app{};
     bool test_isolated_app_restart{};
     bool test_secondary_engine_watchdog{};
+
+    // Dashboard HMI (production, not --test-*): when both are non-empty,
+    // the primary display spawns a real EV cluster + infotainment app side
+    // by side via shell::isolated_app -- see setup_dashboard_apps.
+    std::string cluster_assets;
+    std::string cluster_icu;
+    std::string cluster_aot_lib;
+    std::string infotainment_assets;
+    std::string infotainment_icu;
+    std::string infotainment_aot_lib;
+
     std::vector<std::string> display_specs;      // raw "--display key=val,..." strings
     std::vector<std::string> input_device_specs;  // raw "--input-device match=idx" strings
 
@@ -133,6 +144,19 @@ void print_usage(const char* prog)
         "                   induce a real stall, and confirm it's detected\n"
         "                   and recovered (implies --test-layers; primary\n"
         "                   display)\n"
+        "  --cluster-assets P / --cluster-icu P / --cluster-aot-lib P\n"
+        "                   (GL renderer only) EV instrument cluster Flutter\n"
+        "                   asset dir. Combined with --infotainment-assets,\n"
+        "                   enables the production dashboard layout on the\n"
+        "                   primary display: a real OS-process-isolated\n"
+        "                   cluster app on the left, auto-restart enabled.\n"
+        "                   --cluster-icu/--cluster-aot-lib default the same\n"
+        "                   way --icu/--aot-lib do.\n"
+        "  --infotainment-assets P / --infotainment-icu P / --infotainment-aot-lib P\n"
+        "                   infotainment Flutter asset dir (e.g. the gallery),\n"
+        "                   composited on the right under a status bar/dock;\n"
+        "                   also a real OS-process-isolated shell::isolated_app\n"
+        "                   with auto-restart enabled.\n"
         "  --help           show this help\n",
         prog);
 }
@@ -149,6 +173,12 @@ enum
     kOptChildIpcFd = 263,
     kOptTestIsolatedAppRestart = 264,
     kOptTestSecondaryEngineWatchdog = 265,
+    kOptClusterAssets = 266,
+    kOptClusterIcu = 267,
+    kOptClusterAotLib = 268,
+    kOptInfotainmentAssets = 269,
+    kOptInfotainmentIcu = 270,
+    kOptInfotainmentAotLib = 271,
 };
 
 options parse_args(int argc, char** argv)
@@ -168,6 +198,12 @@ options parse_args(int argc, char** argv)
         {"test-isolated-app", no_argument, nullptr, kOptTestIsolatedApp},
         {"test-isolated-app-restart", no_argument, nullptr, kOptTestIsolatedAppRestart},
         {"test-secondary-engine-watchdog", no_argument, nullptr, kOptTestSecondaryEngineWatchdog},
+        {"cluster-assets", required_argument, nullptr, kOptClusterAssets},
+        {"cluster-icu", required_argument, nullptr, kOptClusterIcu},
+        {"cluster-aot-lib", required_argument, nullptr, kOptClusterAotLib},
+        {"infotainment-assets", required_argument, nullptr, kOptInfotainmentAssets},
+        {"infotainment-icu", required_argument, nullptr, kOptInfotainmentIcu},
+        {"infotainment-aot-lib", required_argument, nullptr, kOptInfotainmentAotLib},
         // Hidden child-renderer-mode flags -- not listed in print_usage(),
         // see the options::child_renderer doc comment.
         {"child-renderer", no_argument, nullptr, kOptChildRenderer},
@@ -228,6 +264,24 @@ options parse_args(int argc, char** argv)
         case kOptTestSecondaryEngineWatchdog:
             out.test_secondary_engine_watchdog = true;
             out.test_layers = true; // the layer it attaches to must exist.
+            break;
+        case kOptClusterAssets:
+            out.cluster_assets = optarg;
+            break;
+        case kOptClusterIcu:
+            out.cluster_icu = optarg;
+            break;
+        case kOptClusterAotLib:
+            out.cluster_aot_lib = optarg;
+            break;
+        case kOptInfotainmentAssets:
+            out.infotainment_assets = optarg;
+            break;
+        case kOptInfotainmentIcu:
+            out.infotainment_icu = optarg;
+            break;
+        case kOptInfotainmentAotLib:
+            out.infotainment_aot_lib = optarg;
             break;
         case kOptChildRenderer:
             out.child_renderer = true;
@@ -872,6 +926,132 @@ void run_secondary_engine_watchdog_test(shell::engine::state* primary, const opt
     shell::log::info("[test-secondary-engine-watchdog] torn down");
     *running = false;
 }
+
+// --- Dashboard HMI (production, not --test-*) ---------------------------------
+//
+// The first non-test use of shell::isolated_app in this codebase: a real
+// digital EV instrument cluster on the left, the gallery as infotainment
+// content on the right, both genuinely OS-process-isolated with Step 5
+// auto-restart enabled. The dashboard app itself (--assets) owns the top
+// status bar and bottom dock as plain Flutter chrome in its own widget
+// tree -- those are not shell::layer entries and need no C++ wiring here.
+constexpr shell::stage::id kDashboardStageId = 10;
+constexpr shell::layer::id kClusterLayerId = 10;        // examples/dashboard/lib/layer_ids.dart must match.
+constexpr shell::layer::id kInfotainmentLayerId = 11;    // examples/dashboard/lib/layer_ids.dart must match.
+constexpr shell::texture::id kClusterTextureId = 2000;
+constexpr shell::texture::id kInfotainmentTextureId = 2001;
+constexpr shell::surface::id kClusterSurfaceId = 10;
+constexpr shell::surface::id kInfotainmentSurfaceId = 11;
+// Kept in sync BY CONVENTION with examples/dashboard's StatusBar/Dock
+// SizedBox heights -- used only so the shell::layer bounds pushed over
+// 'shell/layers' accurately describe the infotainment layer's visible
+// rectangle for introspection. The dashboard's actual Dart layout derives
+// its own split live from LayoutBuilder, not from these constants.
+constexpr float kStatusBarHeight = 56.0F;
+constexpr float kDockHeight = 96.0F;
+
+struct dashboard_apps
+{
+    shell::isolated_app::state cluster;
+    shell::isolated_app::state infotainment;
+    bool cluster_spawned{};
+    bool infotainment_spawned{};
+};
+
+bool setup_dashboard_apps(shell::engine::state& primary, const options& opts,
+                          std::uint32_t display_w, std::uint32_t display_h,
+                          dashboard_apps& apps)
+{
+    const std::uint32_t left_w = display_w / 2;
+    const std::uint32_t right_w = display_w - left_w;
+    const std::uint32_t chrome_h = static_cast<std::uint32_t>(kStatusBarHeight + kDockHeight);
+    const std::uint32_t right_h = display_h > chrome_h ? display_h - chrome_h : display_h;
+
+    shell::engine::add_layer(
+        primary, shell::layer::state{.value = kClusterLayerId, .stage = kDashboardStageId,
+                                     .kind = shell::layer::role::application,
+                                     .bounds = {0, 0, static_cast<float>(left_w),
+                                               static_cast<float>(display_h)}});
+    shell::engine::add_layer(
+        primary, shell::layer::state{.value = kInfotainmentLayerId, .stage = kDashboardStageId,
+                                     .kind = shell::layer::role::application,
+                                     .bounds = {static_cast<float>(left_w), kStatusBarHeight,
+                                               static_cast<float>(right_w),
+                                               static_cast<float>(right_h)}});
+
+    if (!shell::engine::register_texture(primary, kClusterTextureId))
+    {
+        shell::log::info("[dashboard] register_texture(cluster) failed");
+        return false;
+    }
+    shell::isolated_app::config cluster_cfg{
+        .assets = opts.cluster_assets, .icu_data = opts.cluster_icu,
+        .aot_library = opts.cluster_aot_lib, .width = left_w, .height = display_h,
+        .log_tag = "cluster", .primary = &primary, .target_texture = kClusterTextureId,
+        .target_surface = kClusterSurfaceId};
+    cluster_cfg.restart.enabled = true;
+    cluster_cfg.restart.initial_delay = std::chrono::milliseconds(500);
+    cluster_cfg.restart.max_delay = std::chrono::milliseconds(5000);
+    if (auto err = shell::isolated_app::create(apps.cluster, cluster_cfg); !err)
+    {
+        shell::log::info("[dashboard] create(cluster) failed: " + err.error().message);
+        shell::engine::unregister_texture(primary, kClusterTextureId);
+        return false;
+    }
+    shell::log::info("[dashboard] cluster child pid=" + std::to_string(apps.cluster.child.pid));
+    shell::engine::attach_surface(
+        primary, shell::surface::state{.value = kClusterSurfaceId, .layer = kClusterLayerId,
+                                       .size = {left_w, display_h}, .texture = kClusterTextureId,
+                                       .visible = true});
+    apps.cluster_spawned = true;
+
+    if (!shell::engine::register_texture(primary, kInfotainmentTextureId))
+    {
+        shell::log::info("[dashboard] register_texture(infotainment) failed");
+        return apps.cluster_spawned;
+    }
+    shell::isolated_app::config info_cfg{
+        .assets = opts.infotainment_assets, .icu_data = opts.infotainment_icu,
+        .aot_library = opts.infotainment_aot_lib, .width = right_w, .height = right_h,
+        .log_tag = "infotainment", .primary = &primary,
+        .target_texture = kInfotainmentTextureId, .target_surface = kInfotainmentSurfaceId};
+    info_cfg.restart.enabled = true;
+    info_cfg.restart.initial_delay = std::chrono::milliseconds(500);
+    info_cfg.restart.max_delay = std::chrono::milliseconds(5000);
+    if (auto err = shell::isolated_app::create(apps.infotainment, info_cfg); !err)
+    {
+        shell::log::info("[dashboard] create(infotainment) failed: " + err.error().message);
+        shell::engine::unregister_texture(primary, kInfotainmentTextureId);
+        return apps.cluster_spawned;
+    }
+    shell::log::info("[dashboard] infotainment child pid=" +
+                     std::to_string(apps.infotainment.child.pid));
+    shell::engine::attach_surface(
+        primary, shell::surface::state{.value = kInfotainmentSurfaceId,
+                                       .layer = kInfotainmentLayerId,
+                                       .size = {right_w, right_h},
+                                       .texture = kInfotainmentTextureId, .visible = true});
+    apps.infotainment_spawned = true;
+    return true;
+}
+
+void teardown_dashboard_apps(shell::engine::state& primary, dashboard_apps& apps)
+{
+    if (apps.infotainment_spawned)
+    {
+        shell::engine::detach_surface(primary, kInfotainmentSurfaceId);
+        shell::isolated_app::destroy(apps.infotainment);
+        shell::engine::unregister_texture(primary, kInfotainmentTextureId);
+    }
+    if (apps.cluster_spawned)
+    {
+        shell::engine::detach_surface(primary, kClusterSurfaceId);
+        shell::isolated_app::destroy(apps.cluster);
+        shell::engine::unregister_texture(primary, kClusterTextureId);
+    }
+    shell::engine::remove_layer(primary, kInfotainmentLayerId);
+    shell::engine::remove_layer(primary, kClusterLayerId);
+}
 #endif // SHELL_RENDERER_GL
 
 // Runs one display's full engine+backend lifecycle on the calling thread;
@@ -1093,6 +1273,18 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
                 run_secondary_engine_watchdog_test(&engine, opts, &secwdtest_running);
             });
     }
+
+    dashboard_apps dash_apps;
+    bool dashboard_active = false;
+    if (spec.primary && !opts.cluster_assets.empty() && !opts.infotainment_assets.empty())
+    {
+        dashboard_active = setup_dashboard_apps(engine, opts, out.width, out.height, dash_apps);
+    }
+    else if (spec.primary && (opts.cluster_assets.empty() != opts.infotainment_assets.empty()))
+    {
+        shell::log::info("[dashboard] both --cluster-assets and --infotainment-assets "
+                         "are required to enable the dashboard layout; ignoring");
+    }
 #endif
 
 #ifdef SHELL_BACKEND_WAYLAND
@@ -1142,6 +1334,8 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
         secwdtest_running = false;
         secwdtest.join();
     }
+    if (dashboard_active)
+        teardown_dashboard_apps(engine, dash_apps);
 #endif
 
 #ifndef SHELL_BACKEND_WAYLAND
@@ -1156,6 +1350,46 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
     shell::backend::drm::close_output(backend); // also closes `card` once refcount hits 0
 #endif
 }
+
+// Defaults icu/aot_lib for one asset bundle, same convention as the
+// original single-bundle --icu/--aot-lib logic: icu defaults to
+// <assets>/icudtl.dat; aot_lib auto-detects either flutter-pi/ardera-style
+// app.so straight in the assets dir, or Flutter's own
+// release_bundle_linux-<arch>_assets layout (sibling lib/libapp.so). Used
+// for the primary bundle and, for the dashboard layout, the cluster and
+// infotainment bundles too -- each is a fully independent Flutter engine
+// instance with its own assets, so each needs its own defaulting pass.
+void apply_default_bundle_paths(const std::string& assets, std::string& icu,
+                                std::string& aot_lib)
+{
+    if (icu.empty())
+        icu = assets + "/icudtl.dat";
+    if (aot_lib.empty())
+    {
+        auto assets_path = std::filesystem::path(assets);
+        auto candidates = {
+            assets_path / "app.so",
+            assets_path.parent_path() / "lib" / "libapp.so",
+        };
+        for (const auto& candidate : candidates)
+        {
+            if (!std::filesystem::exists(candidate))
+                continue;
+            if (aot_lib.empty())
+            {
+                aot_lib = candidate.string();
+            }
+            else
+            {
+                // Both conventions present, almost always a stale leftover
+                // from an earlier build with the other toolchain. Make the
+                // ignored one visible instead of silently picking one.
+                std::fprintf(stderr, "warning: ignoring %s (using %s instead)\n",
+                             candidate.string().c_str(), aot_lib.c_str());
+            }
+        }
+    }
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -1166,37 +1400,12 @@ int main(int argc, char** argv)
         print_usage(argv[0]);
         return 1;
     }
-    if (opts.icu.empty())
-        opts.icu = opts.assets + "/icudtl.dat";
-    if (opts.aot_lib.empty())
-    {
-        // Two conventions in the wild: flutter-pi/ardera-style gen_snapshot
-        // writes app.so straight into the assets dir; Flutter's own
-        // `release_bundle_linux-<arch>_assets` target instead lays out
-        // <out>/flutter_assets/ next to a sibling <out>/lib/libapp.so.
-        auto assets_path = std::filesystem::path(opts.assets);
-        auto candidates = {
-            assets_path / "app.so",
-            assets_path.parent_path() / "lib" / "libapp.so",
-        };
-        for (const auto& candidate : candidates)
-        {
-            if (!std::filesystem::exists(candidate))
-                continue;
-            if (opts.aot_lib.empty())
-            {
-                opts.aot_lib = candidate.string();
-            }
-            else
-            {
-                // Both conventions present, almost always a stale leftover
-                // from an earlier build with the other toolchain. Make the
-                // ignored one visible instead of silently picking one.
-                std::fprintf(stderr, "warning: ignoring %s (using %s instead)\n",
-                             candidate.string().c_str(), opts.aot_lib.c_str());
-            }
-        }
-    }
+    apply_default_bundle_paths(opts.assets, opts.icu, opts.aot_lib);
+    if (!opts.cluster_assets.empty())
+        apply_default_bundle_paths(opts.cluster_assets, opts.cluster_icu, opts.cluster_aot_lib);
+    if (!opts.infotainment_assets.empty())
+        apply_default_bundle_paths(opts.infotainment_assets, opts.infotainment_icu,
+                                   opts.infotainment_aot_lib);
 
 #ifdef SHELL_RENDERER_GL
     // This process IS the isolated child (Step 4), not a display-owning

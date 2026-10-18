@@ -1,0 +1,13 @@
+.dart_tool/
+build/
+# Engine fonts copied into assets/ during `flutter build bundle`.
+/assets/
+.packages
+pubspec.lock
+.flutter-plugins
+.flutter-plugins-dependencies
+# Standalone release/AOT toolchain fetched by scripts/fetch-release-toolchain.sh.
+/.release-toolchain/
+# GTK desktop-runner scaffolding `flutter assemble`/`flutter build linux`
+# generate; this project uses its own CMake-based shell_app, not this.
+/linux/

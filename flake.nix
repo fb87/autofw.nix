@@ -144,6 +144,39 @@
             --renderer=gl "$@"
         '';
 
+        # Same pattern as galleryAssets, for the dashboard's two new Flutter
+        # apps: prebuilt assets-bundle/ checked in, built once offline (see
+        # examples/cluster, examples/dashboard).
+        clusterAssets = pkgs.runCommandLocal "shell-cluster-assets" {} ''
+          mkdir -p $out
+          cp -r ${./examples/cluster/assets-bundle}/* $out/
+        '';
+        dashboardAssets = pkgs.runCommandLocal "shell-dashboard-assets" {} ''
+          mkdir -p $out
+          cp -r ${./examples/dashboard/assets-bundle}/* $out/
+        '';
+
+        # The dashboard HMI: EV cluster (left, real OS-process isolation) +
+        # gallery-as-infotainment (right, under a status bar/dock), both
+        # auto-restart enabled. --renderer=gl is required -- shell::isolated_app
+        # only exists under SHELL_RENDERER_GL -- which `shell` already is.
+        dashboard = pkgs.writeShellScriptBin "dashboard" ''
+          timeout_s="${toString demoTimeout}"
+          if [ "$#" -gt 0 ] && [ "$1" -ge 0 ] 2>/dev/null; then
+            timeout_s="$1"
+            shift
+          fi
+          exec ${pkgs.coreutils}/bin/timeout "$timeout_s" \
+            ${shell}/bin/shell_app \
+            --assets=${dashboardAssets} \
+            --icu=${dashboardAssets}/icudtl.dat \
+            --cluster-assets=${clusterAssets} \
+            --cluster-icu=${clusterAssets}/icudtl.dat \
+            --infotainment-assets=${galleryAssets} \
+            --infotainment-icu=${galleryAssets}/icudtl.dat \
+            --renderer=gl "$@"
+        '';
+
         # -- true cross-compilation to aarch64, built entirely on x86_64 --
         #
         # Unlike `packages.aarch64-linux.*` above (native `legacyPackages`,
@@ -252,6 +285,7 @@
         default = flutter-engine;
         inherit shell shell-wayland-software shell-drm shell-drm-software;
         inherit gallery galleryAssets;
+        inherit dashboard dashboardAssets clusterAssets;
       } // crossOutputs;
     }) supportedSystems);
 
@@ -261,6 +295,10 @@
         gallery = {
           type = "app";
           program = "${self.packages.${system}.gallery}/bin/gallery";
+        };
+        dashboard = {
+          type = "app";
+          program = "${self.packages.${system}.dashboard}/bin/dashboard";
         };
       };
     }) supportedSystems);
