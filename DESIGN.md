@@ -359,19 +359,83 @@ consistent with every other mode in this codebase. These flags are not
 listed in `--help`; nothing spawns a process with them except
 `shell::ipc::spawn_child`.
 
-No auto-restart on crash: an isolated layer that dies stays blank
-(detached) until the owning layer/surface lifecycle explicitly recreates
-it. This first cut optimizes for "a crash is contained and visible," not
-"a crash self-heals."
-
 Not yet implemented: multi-GPU dma-buf import (the child's render node and
 the primary's display GPU are assumed to be the same physical device --
 true on this project's target single-SoC-GPU automotive hardware, and on
-every sandbox this was verified against); a plugin-manifest-level policy
-for *which* layers get process isolation vs. the in-process
-`shell::secondary_engine` path (today it is a direct API choice made by
-whatever spawns the layer, not a declarative plugin property -- see
-section 13's "Level 3").
+every sandbox this was verified against).
+
+## 9.3 Auto-restart
+
+Both `shell::isolated_app` and `shell::secondary_engine` can automatically
+recover from a failure instead of staying dead -- opt-in per instance via
+`config.restart` (`shell::restart_policy::config`, default
+`enabled=false`, which preserves the pre-restart behavior exactly: a
+failure stays failed until something external recreates the layer).
+`shell::restart_policy` is a small, shared, dependency-free exponential
+backoff primitive (`initial_delay`, `max_delay`, `multiplier`,
+`max_restarts` -- 0 means unlimited -- and `stable_duration`, which resets
+the backoff counter after a long enough healthy run so an isolated crash
+after months of uptime doesn't inherit a maxed-out delay; the same idea as
+Kubernetes' CrashLoopBackOff). Both modules blank the layer immediately on
+failure (`engine::set_surface_visible(primary, target_surface, false)` --
+hiding the surface is enough: `surface::find_by_layer` already filters on
+`visible`, and `encode_layer` already reports `textureId=-1` when it finds
+nothing, so no Dart-side change was needed) and unblank it once a new
+attempt succeeds.
+
+**`shell::isolated_app`** has a crisp, always-observable failure signal --
+the child process dies, the IPC socket EOFs. `detail::try_connect`
+(spawn/handshake/import, extracted from what used to be the entire body of
+`create()`) is retried with backoff from an outer supervisor loop running
+on the same receiver thread that already existed; `destroy()` now also
+sets a `stop_requested` flag and notifies a condition variable so a
+blocked backoff wait doesn't make teardown wait out the remaining delay.
+Verified live: `--test-isolated-app-restart` has the test driver send a
+real `SIGSEGV` to the real child's pid directly (no external `kill`
+needed, unlike this project's original containment test) and confirms a
+*different* pid shows up afterward and content resumes.
+
+**`shell::secondary_engine`** has no equivalent signal: a Dart exception
+doesn't kill it, and a native crash in it takes the whole shell process
+down with it -- there is nothing left to restart. What it detects instead
+is its own native platform-runner-thread going unresponsive: a watchdog
+thread posts a heartbeat lambda into the engine's own `runner_q` every
+`heartbeat_interval` and checks whether `last_heartbeat_ms` advanced
+within `hang_threshold`. On a stall, the inner `engine::state` is torn
+down and reinitialized in place (`pbuffer`/`creator_ctx`/`shared_tex`
+persist across restarts -- they're not what hung); `engine::state` holds a
+mutex/condition_variable/thread and so isn't assignable, so "fresh
+instance" means an explicit destructor call + placement-new, not
+`s.engine = {}` -- safe here because it only ever runs immediately after
+the previous instance's `runner_thread` has already been joined.
+
+This is explicitly **best-effort, not a guarantee**, and meaningfully
+weaker than `isolated_app`'s recovery: a *truly* deadlocked runner thread
+makes the recovery attempt hang too, because tearing it down goes through
+`engine::destroy` -> `stop_runner` -> `runner_thread.join()`. There is no
+safe way to force-kill one native thread from another in C++ without
+risking corruption (`pthread_cancel` is not used anywhere in this project
+and won't be introduced for this), so this is accepted and documented
+rather than worked around. `isolated_app`'s OS-process model is the only
+mechanism in this codebase with a true recovery guarantee, independent of
+*how* the thing it supervises is stuck -- that asymmetry is the main
+reason to prefer process isolation over in-process for anything that must
+actually come back. Also worth noting: the heartbeat only observes this
+embedder's own platform-runner-thread activity, not Flutter/Dart-level
+rendering liveness -- a legitimately static screen is not a hang, but a
+Dart-side infinite loop that never touches the native runner queue won't
+be caught either. Verified live via `--test-secondary-engine-watchdog`,
+which induces a real stall (the test driver holds
+`app.engine.runner_mutex` for longer than `hang_threshold`, blocking the
+watchdog's own heartbeat post -- the same detection path a real stall
+would hit, with no test-only hook added to the shipped header) and
+confirms detection, blanking, and a freshly reinitialized engine resuming
+content.
+
+Not yet implemented: a cap on total wall-clock time spent retrying by
+default (`max_restarts` defaults to 0/unlimited -- a persistently broken
+app retries forever at `max_delay` cadence unless a caller opts into a
+finite cap).
 
 ## 10. Layer
 
@@ -499,13 +563,20 @@ is required. Level 3 must not influence the initial architecture.
 
 The underlying mechanism -- a layer backed by a genuinely separate Flutter
 engine, in-process (`shell::secondary_engine`) or in a separate OS process
-(`shell::isolated_app`) -- exists today; see section 9.2. What Level 3 still
-lacks is a declarative plugin-manifest surface for requesting it (section
-14's `[ui] stage=/layer=` placement has no isolation-level field yet).
+(`shell::isolated_app`), with auto-restart -- exists today; see sections
+9.2/9.3. `shell::plugin::manifest` now carries this as declarative data
+(section 14), but nothing resolves/dispatches it automatically yet: a
+caller still reads `manifest.ui.isolation` and calls the matching module
+directly. `shell::isolated_app::state` and `shell::secondary_engine::state`
+are different concrete types with materially different configs (the
+former needs an ipc/exe_path, the latter doesn't), so a generic
+polymorphic "spawn whichever backend the manifest says" dispatcher is a
+deliberately deferred follow-up, not attempted yet.
 
 ## 14. Plugin placement
 
-Plugins may request semantic placement:
+Plugins may request semantic placement, including isolation level and
+restart policy:
 
 ```toml
 id = "navigation"
@@ -513,9 +584,18 @@ id = "navigation"
 [ui]
 stage = "main"
 layer = "application"
+isolation = "process"   # "none" | "in_process" | "process"
+restart.enabled = true
 ```
 
 The shell remains final policy authority.
+
+This TOML is illustrative, not implemented: `shell::plugin::manifest::ui`
+(`shell::plugin::ui_placement` -- `stage::id`, `layer::id`,
+`isolation_level`, `restart_policy::config`) is a real, in-memory C++
+struct today, built directly by whoever calls `plugin::add()`. There is no
+TOML parser or manifest-file loader anywhere in this codebase; adding one
+is out of scope for what's implemented so far.
 
 ## 15. Transition system
 

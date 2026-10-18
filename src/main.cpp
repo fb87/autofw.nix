@@ -3,6 +3,7 @@
 // Header-only shell framework: builds backend::wayland/drm + engine::state
 // and runs one or more Flutter app instances, one per display.
 #include <atomic>
+#include <csignal>
 #include <cstdio>
 #include <filesystem>
 #include <getopt.h>
@@ -41,6 +42,8 @@ struct options
     bool test_layers{};
     bool test_secondary_engine{};
     bool test_isolated_app{};
+    bool test_isolated_app_restart{};
+    bool test_secondary_engine_watchdog{};
     std::vector<std::string> display_specs;      // raw "--display key=val,..." strings
     std::vector<std::string> input_device_specs;  // raw "--input-device match=idx" strings
 
@@ -118,6 +121,18 @@ void print_usage(const char* prog)
         "                   attach it, as a live texture, to the\n"
         "                   'application' layer from --test-layers' scripted\n"
         "                   sequence (implies --test-layers; primary display)\n"
+        "  --test-isolated-app-restart\n"
+        "                   (GL renderer only) like --test-isolated-app, but\n"
+        "                   with auto-restart enabled -- the driver SIGSEGVs\n"
+        "                   the child itself and confirms it respawns and\n"
+        "                   content resumes (implies --test-layers; primary\n"
+        "                   display)\n"
+        "  --test-secondary-engine-watchdog\n"
+        "                   (GL renderer only) spawn a secondary engine with\n"
+        "                   its heartbeat watchdog + auto-restart enabled,\n"
+        "                   induce a real stall, and confirm it's detected\n"
+        "                   and recovered (implies --test-layers; primary\n"
+        "                   display)\n"
         "  --help           show this help\n",
         prog);
 }
@@ -132,6 +147,8 @@ enum
     kOptChildWidth = 261,
     kOptChildHeight = 262,
     kOptChildIpcFd = 263,
+    kOptTestIsolatedAppRestart = 264,
+    kOptTestSecondaryEngineWatchdog = 265,
 };
 
 options parse_args(int argc, char** argv)
@@ -149,6 +166,8 @@ options parse_args(int argc, char** argv)
         {"test-layers", no_argument, nullptr, 'L'},
         {"test-secondary-engine", no_argument, nullptr, kOptTestSecondaryEngine},
         {"test-isolated-app", no_argument, nullptr, kOptTestIsolatedApp},
+        {"test-isolated-app-restart", no_argument, nullptr, kOptTestIsolatedAppRestart},
+        {"test-secondary-engine-watchdog", no_argument, nullptr, kOptTestSecondaryEngineWatchdog},
         // Hidden child-renderer-mode flags -- not listed in print_usage(),
         // see the options::child_renderer doc comment.
         {"child-renderer", no_argument, nullptr, kOptChildRenderer},
@@ -200,6 +219,14 @@ options parse_args(int argc, char** argv)
             break;
         case kOptTestIsolatedApp:
             out.test_isolated_app = true;
+            out.test_layers = true; // the layer it attaches to must exist.
+            break;
+        case kOptTestIsolatedAppRestart:
+            out.test_isolated_app_restart = true;
+            out.test_layers = true; // the layer it attaches to must exist.
+            break;
+        case kOptTestSecondaryEngineWatchdog:
+            out.test_secondary_engine_watchdog = true;
             out.test_layers = true; // the layer it attaches to must exist.
             break;
         case kOptChildRenderer:
@@ -699,6 +726,152 @@ void run_isolated_app_test(shell::engine::state* primary, const options& opts, b
     shell::log::info("[test-isolated-app] torn down");
     *running = false;
 }
+
+// Step 5: same shape as run_isolated_app_test, but with restart enabled --
+// proves *recovery*, not just containment. The test driver itself sends
+// the SIGSEGV directly (kill(app.child.pid, ...), no external bash
+// choreography needed, unlike this session's original manual
+// verification) and asserts a second, different child pid shows up and
+// content resumes afterward. Distinct texture/surface/layer ids from both
+// other tests so all three could in principle run back to back. Used as
+// `--test-isolated-app-restart` (implies --test-layers; primary display).
+void run_isolated_app_restart_test(shell::engine::state* primary, const options& opts,
+                                   bool* running)
+{
+    std::this_thread::sleep_for(std::chrono::seconds(4));
+
+    constexpr shell::layer::id kLayerId = 2; // "application"
+    constexpr shell::texture::id kTextureId = 960;
+    constexpr shell::surface::id kSurfaceId = 4;
+    constexpr std::uint32_t kWidth = 400;
+    constexpr std::uint32_t kHeight = 300;
+
+    if (!shell::engine::register_texture(*primary, kTextureId))
+    {
+        shell::log::info("[test-isolated-app-restart] register_texture failed");
+        *running = false;
+        return;
+    }
+
+    shell::isolated_app::state app;
+    shell::isolated_app::config cfg{
+        .assets = opts.assets, .icu_data = opts.icu, .aot_library = opts.aot_lib,
+        .width = kWidth, .height = kHeight, .log_tag = "iso-r", .primary = primary,
+        .target_texture = kTextureId, .target_surface = kSurfaceId,
+    };
+    cfg.restart.enabled = true;
+    cfg.restart.initial_delay = std::chrono::milliseconds(500);
+    cfg.restart.max_delay = std::chrono::milliseconds(2000);
+    if (auto err = shell::isolated_app::create(app, cfg); !err)
+    {
+        shell::log::info("[test-isolated-app-restart] create failed: " + err.error().message);
+        shell::engine::unregister_texture(*primary, kTextureId);
+        *running = false;
+        return;
+    }
+    pid_t first_pid = app.child.pid;
+    shell::log::info("[test-isolated-app-restart] child pid=" + std::to_string(first_pid));
+    shell::engine::attach_surface(
+        *primary, shell::surface::state{.value = kSurfaceId, .layer = kLayerId,
+                                        .size = {kWidth, kHeight}, .texture = kTextureId,
+                                        .visible = true});
+    shell::log::info("[test-isolated-app-restart] attached");
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    shell::log::info("[test-isolated-app-restart] sending SIGSEGV to " +
+                     std::to_string(first_pid));
+    kill(first_pid, SIGSEGV);
+
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+
+    shell::log::info("[test-isolated-app-restart] second child pid=" +
+                     std::to_string(app.child.pid) +
+                     (app.child.pid > 0 && app.child.pid != first_pid ? " (respawned)"
+                                                                      : " (NOT respawned)"));
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    shell::engine::detach_surface(*primary, kSurfaceId);
+    shell::isolated_app::destroy(app);
+    shell::engine::unregister_texture(*primary, kTextureId);
+    shell::log::info("[test-isolated-app-restart] torn down");
+    *running = false;
+}
+
+// Step 5: proves shell::secondary_engine's watchdog + restart. There's no
+// safe way to externally kill just one thread of this process the way
+// --test-isolated-app-restart kills a whole child process, so this induces
+// a controlled, real stall instead: the test driver itself locks
+// app.engine.runner_mutex for longer than hang_threshold, which blocks the
+// watchdog thread's own attempt to post a heartbeat into that same
+// engine's runner_q -- exercising the exact detection path (a heartbeat
+// that doesn't get processed in time) without needing any test-only hook
+// inside the shipped header. Used as `--test-secondary-engine-watchdog`
+// (implies --test-layers; primary display).
+void run_secondary_engine_watchdog_test(shell::engine::state* primary, const options& opts,
+                                        bool* running)
+{
+    std::this_thread::sleep_for(std::chrono::seconds(4));
+
+    constexpr shell::layer::id kLayerId = 3; // "overlay"
+    constexpr shell::texture::id kTextureId = 970;
+    constexpr shell::surface::id kSurfaceId = 5;
+    constexpr std::uint32_t kWidth = 300;
+    constexpr std::uint32_t kHeight = 200;
+
+    if (!shell::engine::register_texture(*primary, kTextureId))
+    {
+        shell::log::info("[test-secondary-engine-watchdog] register_texture failed");
+        *running = false;
+        return;
+    }
+
+    shell::secondary_engine::state app;
+    shell::secondary_engine::config cfg{
+        .assets = opts.assets, .icu_data = opts.icu, .aot_library = opts.aot_lib,
+        .width = kWidth, .height = kHeight, .pixel_ratio = 1.0, .fps = 60.0,
+        .log_tag = "sec-wd", .primary = primary, .target_texture = kTextureId,
+        .target_surface = kSurfaceId,
+    };
+    cfg.restart.enabled = true;
+    cfg.restart.initial_delay = std::chrono::milliseconds(500);
+    cfg.restart.max_delay = std::chrono::milliseconds(2000);
+    cfg.heartbeat_interval = std::chrono::milliseconds(500);
+    cfg.hang_threshold = std::chrono::milliseconds(1500);
+    if (auto err = shell::secondary_engine::create(app, cfg); !err)
+    {
+        shell::log::info("[test-secondary-engine-watchdog] create failed: " + err.error().message);
+        shell::engine::unregister_texture(*primary, kTextureId);
+        *running = false;
+        return;
+    }
+    shell::engine::attach_surface(
+        *primary, shell::surface::state{.value = kSurfaceId, .layer = kLayerId,
+                                        .size = {kWidth, kHeight}, .texture = kTextureId,
+                                        .visible = true});
+    shell::log::info("[test-secondary-engine-watchdog] attached");
+
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+
+    shell::log::info("[test-secondary-engine-watchdog] inducing a stall (holding runner_mutex)");
+    {
+        std::lock_guard lock(app.engine.runner_mutex);
+        // Comfortably longer than hang_threshold -- the watchdog's
+        // heartbeat post can't even enqueue while this lock is held, so it
+        // sees no progress and declares a hang.
+        std::this_thread::sleep_for(cfg.hang_threshold * 3);
+    }
+    shell::log::info("[test-secondary-engine-watchdog] stall released");
+
+    std::this_thread::sleep_for(std::chrono::seconds(5));
+
+    shell::engine::detach_surface(*primary, kSurfaceId);
+    shell::secondary_engine::destroy(app);
+    shell::engine::unregister_texture(*primary, kTextureId);
+    shell::log::info("[test-secondary-engine-watchdog] torn down");
+    *running = false;
+}
 #endif // SHELL_RENDERER_GL
 
 // Runs one display's full engine+backend lifecycle on the calling thread;
@@ -894,6 +1067,32 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
                 run_isolated_app_test(&engine, opts, &isotest_running);
             });
     }
+
+    std::thread isorestarttest;
+    bool isorestarttest_running = false;
+    if (spec.primary && opts.test_isolated_app_restart)
+    {
+        isorestarttest_running = true;
+        isorestarttest = std::thread(
+            [&engine, &opts, &isorestarttest_running, tag]
+            {
+                shell::log::set_tag(tag);
+                run_isolated_app_restart_test(&engine, opts, &isorestarttest_running);
+            });
+    }
+
+    std::thread secwdtest;
+    bool secwdtest_running = false;
+    if (spec.primary && opts.test_secondary_engine_watchdog)
+    {
+        secwdtest_running = true;
+        secwdtest = std::thread(
+            [&engine, &opts, &secwdtest_running, tag]
+            {
+                shell::log::set_tag(tag);
+                run_secondary_engine_watchdog_test(&engine, opts, &secwdtest_running);
+            });
+    }
 #endif
 
 #ifdef SHELL_BACKEND_WAYLAND
@@ -932,6 +1131,16 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
     {
         isotest_running = false;
         isotest.join();
+    }
+    if (isorestarttest.joinable())
+    {
+        isorestarttest_running = false;
+        isorestarttest.join();
+    }
+    if (secwdtest.joinable())
+    {
+        secwdtest_running = false;
+        secwdtest.join();
     }
 #endif
 

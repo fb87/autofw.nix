@@ -5,9 +5,12 @@
 #include <unordered_map>
 #include <vector>
 
+#include <shell/layer.hpp>
 #include <shell/native.hpp>
 #include <shell/plugin_abi.h>
+#include <shell/restart_policy.hpp>
 #include <shell/result.hpp>
+#include <shell/stage.hpp>
 
 namespace shell::plugin
 {
@@ -21,6 +24,30 @@ enum class type
     flutter_engine,
 };
 
+// Step 5: declares *where* a plugin's content goes and *how isolated* it
+// should be, as data -- not a dispatcher. shell::isolated_app::state and
+// shell::secondary_engine::state are different concrete types with
+// materially different configs (the former needs an ipc/exe_path, the
+// latter doesn't), and are each still created/destroyed directly by
+// whoever owns the plugin's lifecycle; a caller reads `isolation` and
+// branches to the matching module, passing `restart` into that module's
+// own `config.restart`. See DESIGN.md's Step 5 section for why a generic
+// polymorphic dispatcher isn't attempted here.
+enum class isolation_level
+{
+    none,       // plain content on the primary engine directly (no secondary/isolated engine at all).
+    in_process, // shell::secondary_engine.
+    process,    // shell::isolated_app.
+};
+
+struct ui_placement
+{
+    stage::id stage{};
+    layer::id layer{};
+    isolation_level isolation{isolation_level::none};
+    restart_policy::config restart{}; // only meaningful when isolation != none.
+};
+
 struct manifest
 {
     std::string id;
@@ -30,6 +57,8 @@ struct manifest
 
     // Native rendering capabilities (M9).
     std::vector<native::capability> capabilities;
+
+    ui_placement ui{};
 };
 
 struct entry

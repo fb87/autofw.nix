@@ -671,6 +671,22 @@ inline auto detach_surface(state& s, surface::id sid) -> bool
     return ok;
 }
 
+// Step 5 (auto-restart): hides/shows a surface in place without detaching
+// it -- surface::find_by_layer already filters on surface::state.visible,
+// and encode_layer already reports textureId=-1 when find_by_layer finds
+// nothing for that layer, so this alone is enough to blank a layer (no
+// Dart-side change needed) while its supervisor (shell::isolated_app /
+// shell::secondary_engine) is between a crash and a respawn.
+inline auto set_surface_visible(state& s, surface::id sid, bool visible) -> bool
+{
+    auto* surf = surface::get(s.surfaces, sid);
+    if (!surf)
+        return false;
+    surface::set_visible(*surf, visible);
+    push_layers(s);
+    return true;
+}
+
 // --- vsync / input -----------------------------------------------------------
 inline void on_vsync(state& s)
 {

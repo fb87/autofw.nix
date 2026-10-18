@@ -12,14 +12,19 @@
 //
 // The key behavioral difference from shell::secondary_engine: a crash in
 // the child -- Dart or native -- only ends the child process. This module's
-// receiver thread notices via a clean socket EOF, logs it, and stops; it
+// receiver thread notices via a clean socket EOF, logs it, and (Step 5)
+// either stops for good (restart.enabled == false, the pre-Step-5 default)
+// or blanks the layer and respawns a fresh child after a backoff delay. It
 // deliberately never touches the kiosk-wide `stop_all` flag every backend's
-// on_poll checks. That is the entire point of process-level isolation.
+// on_poll checks, restarting or not. That is the entire point of
+// process-level isolation.
 
 #ifdef SHELL_RENDERER_GL
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -29,7 +34,9 @@
 #include <shell/error.hpp>
 #include <shell/ipc.hpp>
 #include <shell/log.hpp>
+#include <shell/restart_policy.hpp>
 #include <shell/result.hpp>
+#include <shell/surface.hpp>
 #include <shell/texture.hpp>
 
 namespace shell::isolated_app
@@ -46,7 +53,17 @@ struct config
 
     engine::state* primary{};     // must already be engine::init()'d.
     texture::id target_texture{}; // must already be engine::register_texture()'d on `primary`.
+    // Step 5 (auto-restart): must already be engine::attach_surface()'d on
+    // `primary` (same precondition as target_texture) -- only touched if
+    // restart.enabled, to blank the layer between a crash and a respawn
+    // (engine::set_surface_visible). Unused, may be left default, when
+    // restart.enabled is false.
+    surface::id target_surface{};
     std::string exe_path{"/proc/self/exe"};
+    // Step 5: opt-in. Default-constructed config has enabled=false, which
+    // preserves pre-Step-5 behavior exactly -- a crash stays dead, exactly
+    // like before this existed.
+    restart_policy::config restart{};
 };
 
 struct state
@@ -65,8 +82,19 @@ struct state
     // never renders anything, only creates/deletes GL objects.
     EGLContext creator_ctx{EGL_NO_CONTEXT};
     std::vector<texture::dmabuf_image> images; // imported in PRIMARY's share group.
-    std::atomic<bool> running{false};
+    std::atomic<bool> running{false}; // true only while a connected child's frames are being pumped.
     std::thread receiver;
+
+    // Step 5 (auto-restart).
+    restart_policy::state restart_state;
+    // Distinct from `running`: sends the supervisor loop itself (not just
+    // the current attempt's frame pump) a permanent "stop for good" signal
+    // -- set only by destroy(). `running` alone can't carry that meaning
+    // since it's also legitimately false during any backoff gap between
+    // live attempts.
+    std::atomic<bool> stop_requested{false};
+    std::mutex restart_mutex;
+    std::condition_variable restart_cv; // paired with restart_mutex; wakes an interruptible backoff wait.
 };
 
 inline auto create(state& s, config cfg) -> result<void>;
