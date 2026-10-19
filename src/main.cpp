@@ -1697,6 +1697,33 @@ void apply_default_bundle_paths(const std::string& assets, std::string& icu,
 }
 } // namespace
 
+// No SIGTERM/SIGINT handler existed before this -- confirmed directly
+// while testing backend/wayland.hpp's destroy() fix: a plain `kill` on
+// this process never reached any of the shell::backend::*/engine::destroy
+// cleanup paths, because the OS default action for SIGTERM is immediate
+// termination. In production that matters: systemd sends SIGTERM on every
+// `systemctl stop`/`restart` of the unit. Just setting `stop_all` here and
+// letting the existing shutdown path run is enough -- that's the exact
+// same mechanism one display's own connect/setup failure already uses to
+// wind every display down cleanly (see run_one_display's `fail` lambda),
+// so this doesn't introduce a new shutdown path, just a new trigger for
+// the one that already exists.
+//
+// `g_stop_all` is a raw pointer, not a reference, because a signal handler
+// is a plain C-style function with no way to capture state -- set once in
+// main(), right where the real std::atomic<bool> it points to is
+// constructed, before any thread that could receive a signal is spawned.
+// The store is relaxed and lock-free (std::atomic<bool> always is on every
+// platform this project targets) -- the only async-signal-safe operation
+// this handler needs.
+std::atomic<bool>* g_stop_all = nullptr;
+
+void handle_shutdown_signal(int)
+{
+    if (g_stop_all)
+        g_stop_all->store(true, std::memory_order_relaxed);
+}
+
 int main(int argc, char** argv)
 {
     options opts = parse_args(argc, argv);
@@ -1757,6 +1784,12 @@ int main(int argc, char** argv)
 #endif
 
     std::atomic<bool> stop_all{false};
+    g_stop_all = &stop_all;
+    struct sigaction sa{};
+    sa.sa_handler = handle_shutdown_signal;
+    sigaction(SIGTERM, &sa, nullptr);
+    sigaction(SIGINT, &sa, nullptr);
+
     std::vector<std::thread> threads;
     std::vector<int> exit_codes(displays.size(), 0);
     for (std::size_t i = 0; i < displays.size(); ++i)
