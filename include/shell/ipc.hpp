@@ -215,6 +215,22 @@ inline auto recv_handshake(int fd, handshake& hs, std::vector<int>& fds_out,
     if (fds_out.size() != hs.buffer_count)
         return unexpected(
             error{.code = error_code::system, .message = "handshake fd count mismatch"});
+
+    // Sanity-bound the dimensions before the caller trusts them for an EGL/
+    // GBM dma-buf import (isolated_app_impl.hpp::try_connect) -- this struct
+    // comes straight off the wire from the child, and the whole point of
+    // isolated_app is tolerating a buggy/compromised child, not handing its
+    // raw numbers to the GPU driver unchecked. Bounds are generous (this
+    // module never itself produces anything near these limits) specifically
+    // so they only catch garbage, not legitimate future use.
+    constexpr std::uint32_t kMaxDim = 16384;
+    if (hs.width == 0 || hs.width > kMaxDim || hs.height == 0 || hs.height > kMaxDim)
+        return unexpected(
+            error{.code = error_code::system, .message = "handshake: bad width/height"});
+    if (hs.stride < hs.width || hs.stride > hs.width * 16)
+        return unexpected(error{.code = error_code::system, .message = "handshake: bad stride"});
+    if (hs.format == 0)
+        return unexpected(error{.code = error_code::system, .message = "handshake: bad format"});
     return {};
 }
 
@@ -274,6 +290,34 @@ inline auto recv_with_fd(int fd, Msg& msg, int& fd_out) -> bool
     ssize_t n = recvmsg(fd, &in, 0);
     if (n != static_cast<ssize_t>(sizeof(msg)))
         return false;
+    // MSG_CTRUNC means the peer's sendmsg carried more control data (i.e.
+    // more fds) than this buffer -- sized for exactly one -- could hold.
+    // Confirmed empirically (standalone repro, not just read from docs):
+    // the kernel still installs every fd the peer sent into this process's
+    // fd table, even the ones that don't fit in the truncated cmsg data, so
+    // they're real open fds here with no int value we ever see to close
+    // them by. A well-behaved peer (this module's own send_frame_ready/
+    // send_buffer_released) never sends more than one, so this only fires
+    // on a malformed/malicious message -- treat it exactly like any other
+    // protocol violation from an untrusted peer (isolated_app's threat
+    // model: the whole point is tolerating a buggy/compromised child) by
+    // closing whatever fd we did manage to capture and reporting the
+    // message as unusable, same as EOF.
+    if (in.msg_flags & MSG_CTRUNC)
+    {
+        for (cmsghdr* cmsg = CMSG_FIRSTHDR(&in); cmsg != nullptr; cmsg = CMSG_NXTHDR(&in, cmsg))
+        {
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
+            {
+                int leaked = -1;
+                std::memcpy(&leaked, CMSG_DATA(cmsg), sizeof(int));
+                if (leaked >= 0)
+                    close(leaked);
+            }
+        }
+        fd_out = -1;
+        return false;
+    }
     for (cmsghdr* cmsg = CMSG_FIRSTHDR(&in); cmsg != nullptr; cmsg = CMSG_NXTHDR(&in, cmsg))
     {
         if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)

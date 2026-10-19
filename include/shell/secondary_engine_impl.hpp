@@ -133,12 +133,22 @@ inline auto create(state& s, config cfg) -> result<void>
     s.creator_ctx = egl::create_context(dpy, primary_cfg,
                                         static_cast<EGLContext>(primary.gl_ctx));
     if (s.creator_ctx == EGL_NO_CONTEXT)
+    {
+        eglDestroySurface(dpy, s.pbuffer);
+        s.pbuffer = EGL_NO_SURFACE;
         return unexpected(
             error{.code = error_code::egl, .message = "secondary: create creator_ctx"});
+    }
     eglBindAPI(EGL_OPENGL_ES_API);
     if (eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, s.creator_ctx) != EGL_TRUE)
+    {
+        eglDestroyContext(dpy, s.creator_ctx);
+        s.creator_ctx = EGL_NO_CONTEXT;
+        eglDestroySurface(dpy, s.pbuffer);
+        s.pbuffer = EGL_NO_SURFACE;
         return unexpected(
             error{.code = error_code::egl, .message = "secondary: make creator_ctx current"});
+    }
     glGenTextures(1, &s.shared_tex);
     glBindTexture(GL_TEXTURE_2D, s.shared_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -150,8 +160,14 @@ inline auto create(state& s, config cfg) -> result<void>
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
 
     if (s.shared_tex == 0)
+    {
+        eglDestroyContext(dpy, s.creator_ctx);
+        s.creator_ctx = EGL_NO_CONTEXT;
+        eglDestroySurface(dpy, s.pbuffer);
+        s.pbuffer = EGL_NO_SURFACE;
         return unexpected(
             error{.code = error_code::egl, .message = "secondary: glGenTextures failed"});
+    }
 
     texture::bind_external(primary.textures, cfg.target_texture, s.shared_tex, cfg.width,
                            cfg.height);

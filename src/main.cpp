@@ -190,6 +190,27 @@ enum
     kOptTestDashboardInput = 273,
 };
 
+// std::stoul/std::stoi throw on malformed input (non-numeric, empty, or
+// out of range) -- an uncaught exception from inside parse_args would
+// crash the whole process instead of reporting a clean usage error.
+// --width/--height/--ipc-fd/--input-fd are normally parent-generated
+// internal flags (see spawn_config's own --child-renderer argv), but this
+// binary accepts them from argv unconditionally, so malformed input here
+// is a real, reachable case to handle cleanly, not just a theoretical one.
+long parse_long_arg(const char* prog, const char* flag, const char* value)
+{
+    try
+    {
+        return std::stol(value);
+    }
+    catch (const std::exception&)
+    {
+        std::fprintf(stderr, "%s: bad value for %s: '%s'\n", prog, flag, value);
+        print_usage(prog);
+        std::exit(1);
+    }
+}
+
 options parse_args(int argc, char** argv)
 {
     static const option kLong[] = {
@@ -298,16 +319,19 @@ options parse_args(int argc, char** argv)
             out.child_renderer = true;
             break;
         case kOptChildWidth:
-            out.child_width = static_cast<std::uint32_t>(std::stoul(optarg));
+            out.child_width =
+                static_cast<std::uint32_t>(parse_long_arg(argv[0], "--width", optarg));
             break;
         case kOptChildHeight:
-            out.child_height = static_cast<std::uint32_t>(std::stoul(optarg));
+            out.child_height =
+                static_cast<std::uint32_t>(parse_long_arg(argv[0], "--height", optarg));
             break;
         case kOptChildIpcFd:
-            out.child_ipc_fd = std::stoi(optarg);
+            out.child_ipc_fd = static_cast<int>(parse_long_arg(argv[0], "--ipc-fd", optarg));
             break;
         case kOptChildInputFd:
-            out.child_input_fd = std::stoi(optarg);
+            out.child_input_fd =
+                static_cast<int>(parse_long_arg(argv[0], "--input-fd", optarg));
             break;
         case kOptTestDashboardInput:
             out.test_dashboard_input = true;
@@ -982,6 +1006,46 @@ struct dashboard_apps
     shell::layer::geometry infotainment_bounds{};
 };
 
+// Which pane (if any) a pointer/key event should go to. Shared by both
+// backends' input dispatch: Wayland wires it straight into backend.cb.on_
+// pointer/on_key (see run_one_display); DRM wires the identical logic into
+// shell::input_router's per-display dispatch_hook (dashboard_dispatch_*
+// below) since input_router routes per-display, not per-position, on its
+// own.
+enum class dashboard_focus
+{
+    primary,
+    cluster,
+    infotainment,
+};
+
+inline bool dashboard_hit_inside(const shell::layer::geometry& b, double x, double y)
+{
+    return x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height;
+}
+
+inline dashboard_focus dashboard_hit_test(const dashboard_apps& apps, bool dashboard_active,
+                                          double x, double y)
+{
+    if (dashboard_active)
+    {
+        if (dashboard_hit_inside(apps.cluster_bounds, x, y))
+            return dashboard_focus::cluster;
+        if (dashboard_hit_inside(apps.infotainment_bounds, x, y))
+            return dashboard_focus::infotainment;
+    }
+    return dashboard_focus::primary;
+}
+
+inline shell::input::pointer_event dashboard_translate(const shell::input::pointer_event& ev,
+                                                        const shell::layer::geometry& bounds)
+{
+    shell::input::pointer_event local = ev;
+    local.x -= bounds.x;
+    local.y -= bounds.y;
+    return local;
+}
+
 bool setup_dashboard_apps(shell::engine::state& primary, const options& opts,
                           std::uint32_t display_w, std::uint32_t display_h,
                           dashboard_apps& apps)
@@ -1077,6 +1141,64 @@ void teardown_dashboard_apps(shell::engine::state& primary, dashboard_apps& apps
     shell::engine::remove_layer(primary, kInfotainmentLayerId);
     shell::engine::remove_layer(primary, kClusterLayerId);
 }
+
+#ifndef SHELL_BACKEND_WAYLAND
+// DRM parity for the dashboard dispatcher: under Wayland this logic lives
+// directly in backend.cb.on_pointer/on_key (run_one_display, below), since
+// Wayland delivers events straight to whichever display they're already
+// tied to. DRM instead routes every display's input through one shared
+// shell::input_router thread that otherwise sends straight to a display's
+// engine::state* with no notion of position within it (see
+// input_router.hpp's dispatch_one) -- this ctx + the two trampolines below
+// plug into its per-display dispatch_hook to get the exact same hit-test-
+// and-translate behavior there too, reusing dashboard_hit_test/
+// dashboard_translate rather than duplicating them.
+struct dashboard_dispatch_ctx
+{
+    dashboard_apps* apps{};
+    bool* dashboard_active{};
+    dashboard_focus* focus{};
+    shell::engine::state* primary{};
+};
+
+inline void dashboard_dispatch_pointer(void* ctx_raw, const shell::input::pointer_event& ev)
+{
+    auto* ctx = static_cast<dashboard_dispatch_ctx*>(ctx_raw);
+    if (ev.phase == shell::input::pointer_phase::down)
+        *ctx->focus = dashboard_hit_test(*ctx->apps, *ctx->dashboard_active, ev.x, ev.y);
+    switch (*ctx->focus)
+    {
+    case dashboard_focus::cluster:
+        shell::isolated_app::send_pointer(ctx->apps->cluster,
+                                          dashboard_translate(ev, ctx->apps->cluster_bounds));
+        break;
+    case dashboard_focus::infotainment:
+        shell::isolated_app::send_pointer(
+            ctx->apps->infotainment, dashboard_translate(ev, ctx->apps->infotainment_bounds));
+        break;
+    case dashboard_focus::primary:
+        shell::engine::send_pointer(*ctx->primary, ev);
+        break;
+    }
+}
+
+inline void dashboard_dispatch_key(void* ctx_raw, std::uint32_t code, bool down)
+{
+    auto* ctx = static_cast<dashboard_dispatch_ctx*>(ctx_raw);
+    switch (*ctx->focus)
+    {
+    case dashboard_focus::cluster:
+        shell::isolated_app::send_key(ctx->apps->cluster, code, down);
+        break;
+    case dashboard_focus::infotainment:
+        shell::isolated_app::send_key(ctx->apps->infotainment, code, down);
+        break;
+    case dashboard_focus::primary:
+        shell::engine::send_key(*ctx->primary, code, down);
+        break;
+    }
+}
+#endif // !SHELL_BACKEND_WAYLAND
 #endif // SHELL_RENDERER_GL
 
 #if defined(SHELL_RENDERER_GL) && defined(SHELL_BACKEND_WAYLAND)
@@ -1183,41 +1305,23 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
 
 #ifdef SHELL_RENDERER_GL
     // Declared up here (not at the dashboard setup call site below) because
-    // the pointer/key dispatcher wired into backend.cb just below needs to
-    // capture them by reference; setup_dashboard_apps (called later, after
+    // the pointer/key dispatcher wired into backend.cb (Wayland) or the
+    // dashboard_dispatch_ctx (DRM) just below needs to capture/point to
+    // them by reference; setup_dashboard_apps (called later, after
     // engine::init) just populates what's already declared.
     dashboard_apps dash_apps;
     bool dashboard_active = false;
-    enum class dashboard_focus
-    {
-        primary,
-        cluster,
-        infotainment,
-    };
     dashboard_focus focus = dashboard_focus::primary;
-    auto inside = [](const shell::layer::geometry& b, double x, double y)
-    {
-        return x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height;
-    };
-    auto hit_test = [&](double x, double y)
-    {
-        if (dashboard_active)
-        {
-            if (inside(dash_apps.cluster_bounds, x, y))
-                return dashboard_focus::cluster;
-            if (inside(dash_apps.infotainment_bounds, x, y))
-                return dashboard_focus::infotainment;
-        }
-        return dashboard_focus::primary;
-    };
-    auto translate = [](const shell::input::pointer_event& ev,
-                        const shell::layer::geometry& bounds)
-    {
-        shell::input::pointer_event local = ev;
-        local.x -= bounds.x;
-        local.y -= bounds.y;
-        return local;
-    };
+#ifndef SHELL_BACKEND_WAYLAND
+    dashboard_dispatch_ctx dash_dispatch_ctx{.apps = &dash_apps,
+                                             .dashboard_active = &dashboard_active,
+                                             .focus = &focus,
+                                             .primary = &engine};
+    shell::input_router::dispatch_hook dash_dispatch_hook{
+        .ctx = &dash_dispatch_ctx,
+        .on_pointer = dashboard_dispatch_pointer,
+        .on_key = dashboard_dispatch_key};
+#endif
 #endif
 
 #ifdef SHELL_BACKEND_WAYLAND
@@ -1251,16 +1355,16 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
         // pane it started on stays targeted there, standard UI behavior
         // (not re-hit-tested on every move/up).
         if (ev.phase == shell::input::pointer_phase::down)
-            focus = hit_test(ev.x, ev.y);
+            focus = dashboard_hit_test(dash_apps, dashboard_active, ev.x, ev.y);
         switch (focus)
         {
         case dashboard_focus::cluster:
             shell::isolated_app::send_pointer(dash_apps.cluster,
-                                              translate(ev, dash_apps.cluster_bounds));
+                                              dashboard_translate(ev, dash_apps.cluster_bounds));
             break;
         case dashboard_focus::infotainment:
-            shell::isolated_app::send_pointer(dash_apps.infotainment,
-                                              translate(ev, dash_apps.infotainment_bounds));
+            shell::isolated_app::send_pointer(
+                dash_apps.infotainment, dashboard_translate(ev, dash_apps.infotainment_bounds));
             break;
         case dashboard_focus::primary:
             shell::engine::send_pointer(engine, ev);
@@ -1338,7 +1442,19 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
 
 #ifndef SHELL_BACKEND_WAYLAND
     if (router)
+    {
         router->targets[display_index].store(&engine, std::memory_order_release);
+#ifdef SHELL_RENDERER_GL
+        // Gives this display's input_router dispatch the same position-based
+        // dashboard routing Wayland gets via backend.cb.on_pointer/on_key
+        // above -- harmless/no-op for a non-primary or non-dashboard display,
+        // since dashboard_active there stays false and dashboard_hit_test
+        // always resolves to dashboard_focus::primary (today's exact
+        // behavior).
+        router->dispatch_hooks[display_index].store(&dash_dispatch_hook,
+                                                     std::memory_order_release);
+#endif
+    }
 #endif
 
     std::thread producer;
@@ -1520,7 +1636,16 @@ void run_one_display(const options& opts, const display_spec& spec, std::size_t 
 
 #ifndef SHELL_BACKEND_WAYLAND
     if (router)
+    {
+#ifdef SHELL_RENDERER_GL
+        // Clear before the target itself so input_router's dispatch_one
+        // (which loads the target first, then the hook) never observes a
+        // non-null target with a hook that's about to point at a
+        // dash_dispatch_ctx/engine this function is tearing down.
+        router->dispatch_hooks[display_index].store(nullptr, std::memory_order_release);
+#endif
         router->targets[display_index].store(nullptr, std::memory_order_release);
+    }
 #endif
 
     shell::engine::destroy(engine);

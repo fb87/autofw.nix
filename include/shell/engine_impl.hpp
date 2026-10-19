@@ -163,6 +163,37 @@ void destruction_cb(void*)
 {
 }
 
+#ifdef SHELL_RENDERER_GL
+// Destroys whichever of gl_ctx/resource_ctx/upload_ctx init() already
+// created, resetting each to EGL_NO_CONTEXT. Shared by destroy() and by
+// init()'s own failure paths -- a failed init() that already created one
+// or more of these before hitting a later failure (AOT data load,
+// FlutterEngineInitialize, FlutterEngineRunInitialized) must clean them up
+// itself, since engine_alive never becomes true on those paths and so
+// destroy() is never reached to do it.
+void destroy_gl_contexts(state& s)
+{
+    if (!(s.out && s.out->egl_display))
+        return;
+    EGLDisplay dpy = static_cast<EGLDisplay>(s.out->egl_display);
+    if (s.gl_ctx != EGL_NO_CONTEXT)
+    {
+        eglDestroyContext(dpy, s.gl_ctx);
+        s.gl_ctx = EGL_NO_CONTEXT;
+    }
+    if (s.resource_ctx != EGL_NO_CONTEXT)
+    {
+        eglDestroyContext(dpy, s.resource_ctx);
+        s.resource_ctx = EGL_NO_CONTEXT;
+    }
+    if (s.upload_ctx != EGL_NO_CONTEXT)
+    {
+        eglDestroyContext(dpy, s.upload_ctx);
+        s.upload_ctx = EGL_NO_CONTEXT;
+    }
+}
+#endif
+
 } // namespace detail
 
 // ---- public API ---------------------------------------------------------------
@@ -294,6 +325,9 @@ inline auto init(state& s) -> result<void>
         {
             std::free(asset_buf);
             std::free(icu_buf);
+#ifdef SHELL_RENDERER_GL
+            detail::destroy_gl_contexts(s);
+#endif
             stop_runner(s);
             return unexpected(
                 error{.code = error_code::flutter,
@@ -325,6 +359,9 @@ inline auto init(state& s) -> result<void>
         std::free(icu_buf);
         if (s.aot_data)
             FlutterEngineCollectAOTData(s.aot_data);
+#ifdef SHELL_RENDERER_GL
+        detail::destroy_gl_contexts(s);
+#endif
         stop_runner(s);
         return unexpected(error{.code = error_code::flutter, .message = "init failed"});
     }
@@ -333,6 +370,18 @@ inline auto init(state& s) -> result<void>
     std::free(icu_buf);
     if (FlutterEngineRunInitialized(fl) != kSuccess)
     {
+        // s.fl is already a live handle at this point (FlutterEngineInitialize
+        // succeeded) -- must shut it down here too, or it leaks right
+        // alongside the GL contexts below on any caller that retries init()
+        // after this failure (engine_alive never becomes true on this path,
+        // so destroy() is never reached to do it).
+        FlutterEngineShutdown(fl);
+        s.fl = nullptr;
+        if (s.aot_data)
+            FlutterEngineCollectAOTData(s.aot_data);
+#ifdef SHELL_RENDERER_GL
+        detail::destroy_gl_contexts(s);
+#endif
         stop_runner(s);
         return unexpected(error{.code = error_code::flutter, .message = "run failed"});
     }
@@ -501,25 +550,7 @@ inline auto destroy(state& s) -> void
     // leaked 3 EGL contexts per engine lifecycle (harmless for a
     // process-lifetime single engine, but a real leak once displays are
     // created/destroyed repeatedly, e.g. multi-display teardown).
-    if (s.out && s.out->egl_display)
-    {
-        EGLDisplay dpy = static_cast<EGLDisplay>(s.out->egl_display);
-        if (s.gl_ctx != EGL_NO_CONTEXT)
-        {
-            eglDestroyContext(dpy, s.gl_ctx);
-            s.gl_ctx = EGL_NO_CONTEXT;
-        }
-        if (s.resource_ctx != EGL_NO_CONTEXT)
-        {
-            eglDestroyContext(dpy, s.resource_ctx);
-            s.resource_ctx = EGL_NO_CONTEXT;
-        }
-        if (s.upload_ctx != EGL_NO_CONTEXT)
-        {
-            eglDestroyContext(dpy, s.upload_ctx);
-            s.upload_ctx = EGL_NO_CONTEXT;
-        }
-    }
+    detail::destroy_gl_contexts(s);
 #endif
     stop_runner(s);
 }

@@ -239,10 +239,14 @@ inline auto run(config cfg) -> int
                     };
                     engine::send_pointer(s.engine, ev);
                 }
-                else
+                else if (msg.kind == ipc::input_kind::key)
                 {
                     engine::send_key(s.engine, msg.evdev_code, msg.key_down != 0);
                 }
+                // Any other value is a malformed/corrupted message -- ignore
+                // it rather than guessing (previously this fell into the
+                // key-event branch by default, silently misinterpreting
+                // garbage as a key event).
             }
             // Same shutdown signal shape as release_listener_thread: EOF
             // here means the parent is gone (both its fds into this child

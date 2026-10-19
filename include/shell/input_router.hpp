@@ -74,6 +74,22 @@ struct per_display_pointer_state
     std::array<std::pair<double, double>, kMaxTouchSlots> touch_pos{};
 };
 
+// Lets a caller intercept a display's pointer/key events instead of having
+// them go straight to its `engine::state*` -- e.g. the dashboard's
+// position-based dispatcher (hit-test a tap against on-screen panes, route
+// to whichever one it landed in) needs the same interception under DRM
+// that it already gets for free under Wayland via backend.cb.on_pointer/
+// on_key. Deliberately a plain ctx + function-pointer pair, not a
+// std::function: this module knows nothing about dashboards/isolated apps
+// and shouldn't have to -- the caller owns `ctx` and both functions for as
+// long as the hook is installed (same lifetime as the display itself).
+struct dispatch_hook
+{
+    void* ctx{};
+    void (*on_pointer)(void* ctx, const input::pointer_event& ev){};
+    void (*on_key)(void* ctx, std::uint32_t code, bool down){};
+};
+
 struct state
 {
     udev* udev_ctx{};
@@ -86,6 +102,10 @@ struct state
     // thread. Lock-free, since engine::send_pointer/send_key are themselves
     // safe to call from any thread.
     std::vector<std::atomic<shell::engine::state*>> targets;
+    // Indexed the same as `targets`; nullptr (the default) means "send
+    // straight to targets[idx]", today's exact behavior -- zero change for
+    // any display that never installs a hook.
+    std::vector<std::atomic<const dispatch_hook*>> dispatch_hooks;
     std::vector<per_display_pointer_state> pointer_state;
     bool running{};
 };
@@ -168,6 +188,9 @@ inline auto create(state& s, std::span<const device_rule> rules,
     s.targets = std::vector<std::atomic<shell::engine::state*>>(display_count);
     for (auto& t : s.targets)
         t.store(nullptr, std::memory_order_relaxed);
+    s.dispatch_hooks = std::vector<std::atomic<const dispatch_hook*>>(display_count);
+    for (auto& h : s.dispatch_hooks)
+        h.store(nullptr, std::memory_order_relaxed);
     s.pointer_state.assign(display_count, per_display_pointer_state{});
 
     s.udev_ctx = udev_new();
@@ -186,6 +209,30 @@ inline auto create(state& s, std::span<const device_rule> rules,
 
 namespace detail
 {
+// Routes through the display's hook if one is installed, otherwise straight
+// to its engine target -- the one place that decision is made, so
+// dispatch_one's event-decoding switch below doesn't need to care which
+// path a given display uses.
+inline void send_pointer(state& s, std::size_t idx, shell::engine::state& target,
+                         const input::pointer_event& ev)
+{
+    const dispatch_hook* hook = s.dispatch_hooks[idx].load(std::memory_order_acquire);
+    if (hook && hook->on_pointer)
+        hook->on_pointer(hook->ctx, ev);
+    else
+        shell::engine::send_pointer(target, ev);
+}
+
+inline void send_key(state& s, std::size_t idx, shell::engine::state& target,
+                     std::uint32_t code, bool down)
+{
+    const dispatch_hook* hook = s.dispatch_hooks[idx].load(std::memory_order_acquire);
+    if (hook && hook->on_key)
+        hook->on_key(hook->ctx, code, down);
+    else
+        shell::engine::send_key(target, code, down);
+}
+
 inline void dispatch_one(state& s, libinput_event* ev)
 {
     libinput_event_type type = libinput_event_get_type(ev);
@@ -235,7 +282,7 @@ inline void dispatch_one(state& s, libinput_event* ev)
         std::uint32_t code = libinput_event_keyboard_get_key(kev);
         bool pressed =
             libinput_event_keyboard_get_key_state(kev) == LIBINPUT_KEY_STATE_PRESSED;
-        shell::engine::send_key(*target, code, pressed);
+        send_key(s, idx, *target, code, pressed);
         break;
     }
     case LIBINPUT_EVENT_POINTER_MOTION:
@@ -245,12 +292,13 @@ inline void dispatch_one(state& s, libinput_event* ev)
                           static_cast<double>(w));
         ps.y = std::clamp(ps.y + libinput_event_pointer_get_dy(pev), 0.0,
                           static_cast<double>(h));
-        shell::engine::send_pointer(
-            *target, input::pointer_event{.phase = ps.buttons ? input::pointer_phase::move
-                                                              : input::pointer_phase::hover,
-                                          .x = ps.x,
-                                          .y = ps.y,
-                                          .buttons = ps.buttons});
+        send_pointer(
+            s, idx, *target,
+            input::pointer_event{.phase = ps.buttons ? input::pointer_phase::move
+                                                     : input::pointer_phase::hover,
+                                 .x = ps.x,
+                                 .y = ps.y,
+                                 .buttons = ps.buttons});
         break;
     }
     case LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE:
@@ -258,12 +306,13 @@ inline void dispatch_one(state& s, libinput_event* ev)
         auto* pev = libinput_event_get_pointer_event(ev);
         ps.x = libinput_event_pointer_get_absolute_x_transformed(pev, w);
         ps.y = libinput_event_pointer_get_absolute_y_transformed(pev, h);
-        shell::engine::send_pointer(
-            *target, input::pointer_event{.phase = ps.buttons ? input::pointer_phase::move
-                                                              : input::pointer_phase::hover,
-                                          .x = ps.x,
-                                          .y = ps.y,
-                                          .buttons = ps.buttons});
+        send_pointer(
+            s, idx, *target,
+            input::pointer_event{.phase = ps.buttons ? input::pointer_phase::move
+                                                     : input::pointer_phase::hover,
+                                 .x = ps.x,
+                                 .y = ps.y,
+                                 .buttons = ps.buttons});
         break;
     }
     case LIBINPUT_EVENT_POINTER_BUTTON:
@@ -278,12 +327,13 @@ inline void dispatch_one(state& s, libinput_event* ev)
                 ps.buttons |= mask;
             else
                 ps.buttons &= ~mask;
-            shell::engine::send_pointer(
-                *target, input::pointer_event{.phase = pressed ? input::pointer_phase::down
-                                                                : input::pointer_phase::up,
-                                              .x = ps.x,
-                                              .y = ps.y,
-                                              .buttons = ps.buttons});
+            send_pointer(
+                s, idx, *target,
+                input::pointer_event{.phase = pressed ? input::pointer_phase::down
+                                                       : input::pointer_phase::up,
+                                     .x = ps.x,
+                                     .y = ps.y,
+                                     .buttons = ps.buttons});
         }
         break;
     }
@@ -297,8 +347,8 @@ inline void dispatch_one(state& s, libinput_event* ev)
         if (slot >= 0 &&
             static_cast<std::size_t>(slot) < per_display_pointer_state::kMaxTouchSlots)
             ps.touch_pos[static_cast<std::size_t>(slot)] = {x, y};
-        shell::engine::send_pointer(
-            *target,
+        send_pointer(
+            s, idx, *target,
             input::pointer_event{
                 .device = static_cast<std::uint32_t>(slot),
                 .phase = type == LIBINPUT_EVENT_TOUCH_DOWN ? input::pointer_phase::down
@@ -318,12 +368,13 @@ inline void dispatch_one(state& s, libinput_event* ev)
              static_cast<std::size_t>(slot) < per_display_pointer_state::kMaxTouchSlots)
                 ? ps.touch_pos[static_cast<std::size_t>(slot)]
                 : std::pair<double, double>{};
-        shell::engine::send_pointer(
-            *target, input::pointer_event{.device = static_cast<std::uint32_t>(slot),
-                                          .phase = input::pointer_phase::up,
-                                          .x = x,
-                                          .y = y,
-                                          .kind = input::device_type::touch});
+        send_pointer(
+            s, idx, *target,
+            input::pointer_event{.device = static_cast<std::uint32_t>(slot),
+                                 .phase = input::pointer_phase::up,
+                                 .x = x,
+                                 .y = y,
+                                 .kind = input::device_type::touch});
         break;
     }
     default:
