@@ -538,8 +538,27 @@ inline auto swap(state& s) -> bool
     return ok;
 }
 
+// Tears down everything connect()/setup_egl()/setup_surface() may have
+// created, in child-before-parent order -- callable after ANY of those
+// three fail partway through (every caller in src/main.cpp calls destroy()
+// immediately on a failure from any of them, same contract
+// close_output/teardown_dumb_buffer rely on in backend/drm.hpp), as well
+// as at normal end-of-life shutdown. Previously only handled
+// surface/wl_window/egl.surface/egl.display/display -- registry,
+// compositor, wm_base, seat, shm, xdg_surface, xdg_toplevel, pointer,
+// keyboard, a still-pending frame callback, and the last-presented shm
+// buffer were never destroyed at all, on any path (a real, if bounded and
+// one-time-per-process, proxy-object leak).
 inline auto destroy(state& s) -> void
 {
+    if (s.xt)
+        xdg_toplevel_destroy(s.xt);
+    if (s.xs)
+        xdg_surface_destroy(s.xs);
+    if (s.frame_cb)
+        wl_callback_destroy(s.frame_cb);
+    if (s.shm_buffer)
+        wl_buffer_destroy(s.shm_buffer);
 #ifdef SHELL_RENDERER_GL
     if (s.egl.surface)
     {
@@ -551,6 +570,20 @@ inline auto destroy(state& s) -> void
 #endif
     if (s.surface)
         wl_surface_destroy(s.surface);
+    if (s.pointer)
+        wl_pointer_destroy(s.pointer);
+    if (s.keyboard)
+        wl_keyboard_destroy(s.keyboard);
+    if (s.seat)
+        wl_seat_destroy(s.seat);
+    if (s.wm_base)
+        xdg_wm_base_destroy(s.wm_base);
+    if (s.compositor)
+        wl_compositor_destroy(s.compositor);
+    if (s.shm)
+        wl_shm_destroy(s.shm);
+    if (s.registry)
+        wl_registry_destroy(s.registry);
 #ifdef SHELL_RENDERER_GL
     if (s.egl.display)
         eglTerminate(static_cast<EGLDisplay>(s.egl.display));

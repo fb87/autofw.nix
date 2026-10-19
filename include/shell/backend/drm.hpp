@@ -446,26 +446,35 @@ inline auto swap(state& s) -> bool
     return true;
 }
 
+// Tears down whatever a (possibly partial) setup_dumb_buffers attempt
+// created, resetting every field back to its zero default. Used both by
+// close_output's real teardown and by setup_dumb_buffers' own failure
+// paths (so a retry starts from a clean slate instead of a mix of set-up
+// and leaked buffers, which previously left close_output's "already set
+// up" guard -- s.dumb[0].fb_id != 0 -- lying about dumb[1]'s actual state).
+inline auto teardown_dumb_buffer(int fd, dumb_buf& buf) -> void
+{
+    if (buf.map)
+        munmap(buf.map, buf.size);
+    if (buf.fb_id && fd >= 0)
+        drmModeRmFB(fd, buf.fb_id);
+    if (buf.handle && fd >= 0)
+    {
+        drm_mode_destroy_dumb req{};
+        req.handle = buf.handle;
+        drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &req);
+    }
+    buf = dumb_buf{};
+}
+
 // Tears this output down (surfaces/FBs/CRTC claim) and, once the owning
 // card's refcount reaches zero (i.e. this was the last output on it), tears
 // the shared card down too.
 inline void close_output(state& s)
 {
     int fd = s.owner ? s.owner->fd : -1;
-    // Release software dumb buffers.
     for (auto& buf : s.dumb)
-    {
-        if (buf.map)
-            munmap(buf.map, buf.size);
-        if (buf.fb_id && fd >= 0)
-            drmModeRmFB(fd, buf.fb_id);
-        if (buf.handle && fd >= 0)
-        {
-            drm_mode_destroy_dumb req{};
-            req.handle = buf.handle;
-            drmIoctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &req);
-        }
-    }
+        teardown_dumb_buffer(fd, buf);
     if (s.fb_id && fd >= 0)
         drmModeRmFB(fd, s.fb_id);
 #ifdef SHELL_RENDERER_GL
@@ -498,24 +507,41 @@ inline auto setup_dumb_buffers(state& s) -> result<void>
         req.height = s.height;
         req.bpp = 32;
         if (drmIoctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &req) < 0)
+        {
+            for (auto& b : s.dumb)
+                teardown_dumb_buffer(fd, b);
             return unexpected(
                 error{.code = error_code::drm, .message = "create dumb buffer"});
+        }
         buf.handle = req.handle;
         s.dumb_stride = req.pitch;
         buf.size = static_cast<std::size_t>(req.size);
         drm_mode_map_dumb mp{};
         mp.handle = buf.handle;
         if (drmIoctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mp) < 0)
+        {
+            for (auto& b : s.dumb)
+                teardown_dumb_buffer(fd, b);
             return unexpected(
                 error{.code = error_code::drm, .message = "map dumb buffer"});
+        }
         buf.map =
             mmap(nullptr, buf.size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, mp.offset);
         if (buf.map == MAP_FAILED)
+        {
+            buf.map = nullptr; // teardown_dumb_buffer's munmap guard checks this, not MAP_FAILED
+            for (auto& b : s.dumb)
+                teardown_dumb_buffer(fd, b);
             return unexpected(
                 error{.code = error_code::drm, .message = "mmap dumb buffer"});
+        }
         if (drmModeAddFB(fd, s.width, s.height, 24, 32, s.dumb_stride, buf.handle,
                          &buf.fb_id) != 0)
+        {
+            for (auto& b : s.dumb)
+                teardown_dumb_buffer(fd, b);
             return unexpected(error{.code = error_code::drm, .message = "add dumb fb"});
+        }
     }
     return {};
 }
