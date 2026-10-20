@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # GUI input automation test.
 #
-# Launches the gallery under the Wayland/GL shell with `--test-input`, which
-# drives a deterministic sequence of every key class (letters, digits, space,
+# Launches the gallery under the standalone test_input binary (shell_tests::
+# run_input_test, see tests/shell_test_drivers.hpp), which drives a
+# deterministic sequence of every key class (letters, digits, space,
 # backspace, delete, enter, tab, arrows, home, end, pageup/down, insert)
 # straight through engine::send_key on the platform thread.
 #
-# Pass criteria (checked against the shell log):
-#   * --test-input ran and no Flutter platform-thread violations occurred.
+# Pass criteria (checked against the log):
+#   * the driver ran and no Flutter platform-thread violations occurred.
 #   * every injected key was accepted by FlutterEngineSendKeyEvent.
 #   * printable keys accumulated text and backspace trimmed it.
 #   * navigation keys moved the text-field caret (left->-1, right->+1,
@@ -20,13 +21,13 @@ say() { printf '%s\n' "$*"; }
 pass() { say "  PASS: $*"; }
 bad()  { say "  FAIL: $*"; fail=1; }
 
-SHELL_BIN=$(nix build --show-trace '.#shell' --no-link --print-out-paths 2>/dev/null)/bin/shell_app
+TEST_BIN=$(nix build --show-trace '.#shell' --no-link --print-out-paths 2>/dev/null)/bin/test_input
 ASSETS=$(nix build '.#galleryAssets' --no-link --print-out-paths 2>/dev/null)
-say "shell = $SHELL_BIN"
+say "test_input = $TEST_BIN"
 say "assets= $ASSETS"
 
 LOG=$(mktemp /tmp/gui_keys_XXXX.log)
-"$SHELL_BIN" --assets="$ASSETS" --icu="$ASSETS/icudtl.dat" --renderer=gl --test-input >"$LOG" 2>&1 &
+"$TEST_BIN" --assets="$ASSETS" --icu="$ASSETS/icudtl.dat" --renderer=gl >"$LOG" 2>&1 &
 APP=$!
 sleep 26
 
@@ -51,5 +52,5 @@ if [ "$distinct" -ge 5 ]; then pass "caret visited $distinct distinct positions 
 say "== button result =="
 if [ "$fail" -eq 0 ]; then say "GUI key test PASSED"; else say "GUI key test FAILED"; fi
 kill "$APP" 2>/dev/null
-pkill -9 -f '[s]hell_app' 2>/dev/null
+pkill -9 -f '[t]est_input' 2>/dev/null
 exit "$fail"

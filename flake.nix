@@ -160,6 +160,10 @@
         # gallery-as-infotainment (right, under a status bar/dock), both
         # auto-restart enabled. --renderer=gl is required -- shell::isolated_app
         # only exists under SHELL_RENDERER_GL -- which `shell` already is.
+        # A standalone binary (shell_dashboard, built alongside shell_app by
+        # the same `shell` package) on top of shell::single_display, not a
+        # hidden flag on shell_app -- demo-app code lives in examples/, not
+        # in the generic shell.
         dashboard = pkgs.writeShellScriptBin "dashboard" ''
           timeout_s="${toString demoTimeout}"
           if [ "$#" -gt 0 ] && [ "$1" -ge 0 ] 2>/dev/null; then
@@ -167,7 +171,7 @@
             shift
           fi
           exec ${pkgs.coreutils}/bin/timeout "$timeout_s" \
-            ${shell}/bin/shell_app \
+            ${shell}/bin/shell_dashboard \
             --assets=${dashboardAssets} \
             --icu=${dashboardAssets}/icudtl.dat \
             --cluster-assets=${clusterAssets} \

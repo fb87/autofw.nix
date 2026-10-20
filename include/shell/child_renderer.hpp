@@ -35,10 +35,12 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <thread>
 
+#include <shell/args.hpp>
 #include <shell/backend.hpp>
 #include <shell/egl.hpp>
 #include <shell/engine.hpp>
@@ -104,6 +106,53 @@ struct state
 // The child's entire post-exec program. Blocks until the parent goes away
 // (IPC socket EOF) or the process is killed. Returns a process exit code.
 auto run(config cfg) -> int;
+
+// shell::isolated_app spawns its child via shell::ipc::spawn_child, which
+// re-execs /proc/self/exe -- this SAME binary -- with --child-renderer (+
+// --ipc-fd/--input-fd/--width/--height/--assets/--icu/--aot-lib). That
+// re-exec'd process must dispatch straight into run() above instead of
+// its normal main() logic; shell_app's main() already does this check
+// first thing. Every OTHER binary that calls shell::isolated_app::create()
+// (examples/dashboard, tests/test_isolated_app*) needs the identical
+// check -- this is that check, factored once: parses those flags out of
+// argv and runs to completion if --child-renderer is present, returning
+// the exit code; returns std::nullopt (parses nothing further, touches
+// no state) if it's not, meaning the caller should proceed with its own
+// normal CLI handling instead.
+inline auto maybe_run_as_child(int argc, char** argv) -> std::optional<int>
+{
+    bool is_child = false;
+    std::string assets, icu, aot_lib;
+    std::uint32_t width = 1280, height = 720;
+    int ipc_fd = -1, input_fd = -1;
+    for (int i = 1; i < argc; ++i)
+    {
+        std::string_view a = argv[i];
+        std::string v;
+        if (a == "--child-renderer")
+            is_child = true;
+        else if (shell::args::match(a, "--assets", v))
+            assets = v;
+        else if (shell::args::match(a, "--icu", v))
+            icu = v;
+        else if (shell::args::match(a, "--aot-lib", v))
+            aot_lib = v;
+        else if (shell::args::match(a, "--width", v))
+            width = static_cast<std::uint32_t>(std::stoul(v));
+        else if (shell::args::match(a, "--height", v))
+            height = static_cast<std::uint32_t>(std::stoul(v));
+        else if (shell::args::match(a, "--ipc-fd", v))
+            ipc_fd = std::stoi(v);
+        else if (shell::args::match(a, "--input-fd", v))
+            input_fd = std::stoi(v);
+    }
+    if (!is_child)
+        return std::nullopt;
+    config cfg{.assets = assets, .icu_data = icu, .aot_library = aot_lib,
+              .width = width, .height = height, .log_tag = "child",
+              .ipc_fd = ipc_fd, .input_fd = input_fd};
+    return run(cfg);
+}
 
 } // namespace shell::child_renderer
 

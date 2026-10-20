@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # GUI layer compositing automation test.
 #
-# Launches the gallery under the Wayland/GL shell with `--test-layers`, which
-# drives a deterministic sequence of add_layer/set_layer_visible/
+# Launches the gallery under the standalone test_layers binary (shell_tests::
+# run_layer_test, see tests/shell_test_drivers.hpp), which drives a
+# deterministic sequence of add_layer/set_layer_visible/
 # set_layer_opacity/remove_layer calls straight through the engine's
-# shell::layer registry (see run_layer_test in src/main.cpp). Each change
-# pushes an "update" method call on the 'shell/layers' channel to the
-# gallery's ShellLayerHost widget (flutter/lib/layer_host.dart), which
-# debugPrint()s one "[layer] ..." line per layer in the new snapshot.
+# shell::layer registry. Each change pushes an "update" method call on the
+# 'shell/layers' channel to the gallery's ShellLayerHost widget
+# (flutter/lib/layer_host.dart), which debugPrint()s one "[layer] ..."
+# line per layer in the new snapshot.
 #
-# Pass criteria (checked against the shell log):
-#   * --test-layers ran and completed its scripted sequence.
+# Pass criteria (checked against the log):
+#   * the driver ran and completed its scripted sequence.
 #   * the background/application/overlay layers were all added and reached
 #     Dart (push_layers -> ShellLayerHost._onMethodCall -> debugPrint).
 #   * the application layer's visibility toggled off then back on.
@@ -24,13 +25,13 @@ say() { printf '%s\n' "$*"; }
 pass() { say "  PASS: $*"; }
 bad()  { say "  FAIL: $*"; fail=1; }
 
-SHELL_BIN=$(nix build --show-trace '.#shell' --no-link --print-out-paths 2>/dev/null)/bin/shell_app
+TEST_BIN=$(nix build --show-trace '.#shell' --no-link --print-out-paths 2>/dev/null)/bin/test_layers
 ASSETS=$(nix build '.#galleryAssets' --no-link --print-out-paths 2>/dev/null)
-say "shell = $SHELL_BIN"
+say "test_layers = $TEST_BIN"
 say "assets= $ASSETS"
 
 LOG=$(mktemp /tmp/gui_layers_XXXX.log)
-"$SHELL_BIN" --assets="$ASSETS" --icu="$ASSETS/icudtl.dat" --renderer=gl --test-layers >"$LOG" 2>&1 &
+"$TEST_BIN" --assets="$ASSETS" --icu="$ASSETS/icudtl.dat" --renderer=gl >"$LOG" 2>&1 &
 APP=$!
 sleep 10
 
@@ -88,5 +89,5 @@ fi
 say "== button result =="
 if [ "$fail" -eq 0 ]; then say "GUI layer test PASSED"; else say "GUI layer test FAILED"; fi
 kill "$APP" 2>/dev/null
-pkill -9 -f '[s]hell_app' 2>/dev/null
+pkill -9 -f '[t]est_layers' 2>/dev/null
 exit "$fail"

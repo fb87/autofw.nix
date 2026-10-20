@@ -114,13 +114,26 @@ else()
   message(FATAL_ERROR "Unknown OA_RENDERER '${OA_RENDERER}'")
 endif()
 
-set(SHELL_APP_SOURCES src/main.cpp)
-if(OA_BACKEND STREQUAL "wayland")
-  # Wayland xdg-shell generated bindings.
-  list(APPEND SHELL_APP_SOURCES include/shell/protocol/xdg-shell-protocol.c)
-endif()
-add_executable(shell_app ${SHELL_APP_SOURCES})
-target_link_libraries(shell_app PRIVATE shell_impl ${CMAKE_DL_LIBS} pthread)
+# A generic-shell binary (shell_app, shell_ctrl), a framework self-test
+# (tests/test_*), or a demo app (examples/dashboard) -- all link the same
+# shell_impl, all get the Wayland xdg-shell generated bindings appended
+# when that's the backend (every one of them pulls in backend/wayland.hpp
+# transitively, directly or via shell::single_display), and all install
+# into this package's bin/ dir: tests/gui_*_test.sh and flake.nix's
+# nix-run apps resolve every one of these by name inside the SAME `nix
+# build '.#shell'` output, same as shell_app always has been.
+function(shell_add_app name)
+  set(sources ${ARGN})
+  if(OA_BACKEND STREQUAL "wayland")
+    list(APPEND sources include/shell/protocol/xdg-shell-protocol.c)
+  endif()
+  add_executable(${name} ${sources})
+  target_link_libraries(${name} PRIVATE shell_impl ${CMAKE_DL_LIBS} pthread)
+  install(TARGETS ${name} RUNTIME DESTINATION bin)
+endfunction()
+
+shell_add_app(shell_app src/main.cpp)
+shell_add_app(shell_ctrl src/shell_ctrl.cpp)
 
 # ---------------------------------------------------------------------------
 # Examples & tests
@@ -131,6 +144,11 @@ option(SHELL_BUILD_TESTS "Build shell tests" ON)
 if(SHELL_BUILD_EXAMPLES)
   add_executable(shell_minimal examples/minimal/main.cpp)
   target_link_libraries(shell_minimal PRIVATE shell_impl)
+
+  if(OA_RENDERER STREQUAL "gl")
+    shell_add_app(shell_dashboard examples/dashboard/main.cpp)
+    shell_add_app(test_dashboard_input examples/dashboard/test_input/main.cpp)
+  endif()
 endif()
 
 if(SHELL_BUILD_TESTS)
@@ -138,6 +156,14 @@ if(SHELL_BUILD_TESTS)
   add_executable(shell_headers_test tests/headers/main.cpp)
   target_link_libraries(shell_headers_test PRIVATE shell_impl)
   add_test(NAME shell.headers COMMAND shell_headers_test)
-endif()
 
-install(TARGETS shell_app RUNTIME DESTINATION bin)
+  shell_add_app(test_demo_texture tests/test_demo_texture/main.cpp)
+  shell_add_app(test_input tests/test_input/main.cpp)
+  shell_add_app(test_layers tests/test_layers/main.cpp)
+  if(OA_RENDERER STREQUAL "gl")
+    shell_add_app(test_secondary_engine tests/test_secondary_engine/main.cpp)
+    shell_add_app(test_isolated_app tests/test_isolated_app/main.cpp)
+    shell_add_app(test_isolated_app_restart tests/test_isolated_app_restart/main.cpp)
+    shell_add_app(test_secondary_engine_watchdog tests/test_secondary_engine_watchdog/main.cpp)
+  endif()
+endif()
